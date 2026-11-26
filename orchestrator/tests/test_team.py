@@ -159,6 +159,25 @@ def test_dsh_model_overlay(dsh_repo):
     assert 'model: "deepseek-reasoner"' in text
 
 
+def test_dsh_model_overlay_writes_reasoning_effort(dsh_repo):
+    (dsh_repo / "aidevteam.toml").write_text(
+        '[agents]\nbackend = "dsh"\n\n'
+        '[agents.models]\ndefault = "deepseek-official/deepseek-flash"\n'
+        'analyst = "deepseek-official/deepseek-flash@high"\n',
+        encoding="utf-8",
+    )
+    res = run_agent(dsh_repo, "analyst", "разбери")
+    assert res.ok, res.error
+    overlay = dsh_repo / ".aidevteam" / "dsh" / "model-analyst.yml"
+    text = overlay.read_text(encoding="utf-8")
+    assert 'reasoningEffort: "high"' in text
+    # роль без @ берёт default без effort
+    res = run_agent(dsh_repo, "developer", "сделай")
+    assert res.ok, res.error
+    dev = (dsh_repo / ".aidevteam" / "dsh" / "model-developer.yml").read_text(encoding="utf-8")
+    assert "reasoningEffort" not in dev
+
+
 def test_dsh_invalid_model_spec(dsh_repo):
     (dsh_repo / "aidevteam.toml").write_text(
         '[agents]\nbackend = "dsh"\n\n[agents.models]\nreviewer = "no-provider"\n',

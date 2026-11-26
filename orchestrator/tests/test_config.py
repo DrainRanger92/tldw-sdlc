@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from aidevteam.config import Config
+import pytest
+
+from aidevteam.config import Config, parse_model_spec
 
 
 def test_defaults_without_file(tmp_path: Path):
@@ -100,3 +102,30 @@ def test_validate_rejects_bad_model_spec(tmp_path: Path):
         assert "provider/model" in str(exc)
     else:
         raise AssertionError("ожидалась ошибка валидации модели")
+
+
+def test_model_spec_with_reasoning_effort():
+    assert parse_model_spec("deepseek-official/deepseek-flash@high") == (
+        "deepseek-official", "deepseek-flash", "high",
+    )
+    assert parse_model_spec("deepseek-official/deepseek-flash") == (
+        "deepseek-official", "deepseek-flash", None,
+    )
+    assert parse_model_spec(" deepseek-official / deepseek-flash @ high ") == (
+        "deepseek-official", "deepseek-flash", "high",
+    )
+
+
+def test_model_spec_rejects_broken_values():
+    for bad in ("no-provider", "provider/", "/model", "p/m@"):
+        with pytest.raises(ValueError):
+            parse_model_spec(bad)
+
+
+def test_validate_checks_model_spec(tmp_path):
+    (tmp_path / "aidevteam.toml").write_text(
+        '[agents.models]\nanalyst = "p/m@"\n', encoding="utf-8"
+    )
+    cfg = Config.load(tmp_path)
+    with pytest.raises(ValueError, match="agents.models.analyst"):
+        cfg.validate()

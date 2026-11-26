@@ -112,17 +112,22 @@ backend = "opencode"
 
 ## Модели ролей
 
-Модель задаётся строкой `provider/model` в `aidevteam.toml`; отсутствующая роль
-берёт `default`. Ревьюера можно переключить одной строкой, не трогая YAML:
+Модель задаётся строкой `provider/model[@effort]` в `aidevteam.toml`; отсутствующая
+роль берёт `default`. Effort — это `reasoningEffort` DSH: без `@` работает дефолт
+провайдера, с `@high`/`@max` роль платит больше reasoning-токенов, но думает
+глубже. Уровни проверяет сам DSH по своему каталогу: для `deepseek-flash` это
+`off|low|high|max`, неподдерживаемый уровень отклоняется на старте
+(`UNSUPPORTED_REASONING_EFFORT`).
 
 ```toml
 [agents.models]
 default  = "deepseek-official/deepseek-flash"
-reviewer = "deepseek-official/deepseek-reasoner"
+analyst  = "deepseek-official/deepseek-flash@high"
+reviewer = "deepseek-official/deepseek-flash@high"
 ```
 
-Оркестратор передаёт модель отдельным `--patch`; при пустой секции работает
-дефолт профиля DSH.
+Оркестратор передаёт модель отдельным `--patch`; `aidevteam doctor` печатает
+карту ролей с effort. При пустой секции работает дефолт профиля DSH.
 
 ## Ограничения безопасности
 

@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from aidevteam.config import Config
+from aidevteam.config import Config, parse_model_spec
 
 
 class BudgetExceeded(RuntimeError):
@@ -228,15 +228,14 @@ def _parse_dsh_events(stdout: str) -> tuple[str, str | None, str, object]:
 
 
 def _model_overlay(root: Path, cfg: Config, role: str) -> tuple[Path | None, str]:
-    """Оверлей модели на вызов: ревьюера можно менять одной строкой в toml."""
+    """Оверлей модели на вызов: модель и reasoning effort роли из toml."""
     spec = cfg.agent_models.get(role) or cfg.agent_models.get("default")
     if not spec:
         return None, ""
-    if spec.count("/") != 1:
-        return None, f"модель {role}: ожидается provider/model, получено {spec!r}"
-    provider, model = spec.split("/", 1)
-    if not provider or not model:
-        return None, f"модель {role}: пустой provider или model в {spec!r}"
+    try:
+        provider, model, effort = parse_model_spec(spec)
+    except ValueError as exc:
+        return None, f"модель {role}: {exc}"
     path = root / ".aidevteam" / "dsh" / f"model-{role}.yml"
     path.parent.mkdir(parents=True, exist_ok=True)
     body = (
@@ -245,6 +244,8 @@ def _model_overlay(root: Path, cfg: Config, role: str) -> tuple[Path | None, str
         f"    provider: {json.dumps(provider, ensure_ascii=False)}\n"
         f"    model: {json.dumps(model, ensure_ascii=False)}\n"
     )
+    if effort:
+        body += f"    reasoningEffort: {json.dumps(effort, ensure_ascii=False)}\n"
     path.write_text(body, encoding="utf-8")
     return path, ""
 
