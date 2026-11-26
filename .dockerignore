@@ -1,0 +1,15 @@
+.git
+.gitignore
+.aidevteam
+.env
+.env.*
+!.env.example
+node_modules
+.venv
+app/.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+*.egg-info
+app/data
+app/dist

@@ -1,0 +1,34 @@
+# Конфигурация оркестратора aidevteam. Все значения необязательны.
+[cycle]
+max_agent_calls = 40
+max_review_iterations = 2
+stage_timeout_sec = 1800
+
+[watch]
+interval_sec = 300
+
+[app]
+port = 3000
+
+[git]
+# auto — пушить в origin, если доступен на запись; never — только локальные коммиты
+push = "auto"
+
+[agents]
+# dsh — основной бэкенд; opencode — запасной путь на время миграции.
+backend = "dsh"
+
+[agents.models]
+# Формат: provider/model. Строка reviewer меняет модель ревьюера без правок кода.
+default = "deepseek-official/deepseek-flash"
+reviewer = "deepseek-official/deepseek-flash"
+
+[agents.dsh]
+bin = "dsh"                 # или AIDEVTEAM_DSH_BIN; путь не обязан быть в проекте
+version = "0.2.2-rc.5"      # doctor сверяет с `dsh --version`
+profile = "headless"
+permission_mode = "danger-full-access"
+approval_policy = "never"
+reviewer_permission_mode = "read-only"
+roles_dir = "dsh/roles"
+env_file = ".env"           # DEEPSEEK_API_KEY читается DSH из этого файла

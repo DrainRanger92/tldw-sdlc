@@ -1,0 +1,16 @@
+node_modules/
+app/data/
+app/dist/
+app/.venv/
+.venv/
+.aidevteam/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.claude/settings.local.json
+.env
+.env.*
+!.env.example

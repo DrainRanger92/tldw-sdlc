@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Фейковый `dsh` для тестов aidevteam.
+
+Режимы через FAKE_DSH_MODE: ok (по умолчанию), fail, error_event,
+bad_reason, empty, timeout.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+MARKS = {
+    "analyst": "аналитик",
+    "planner": "планировщик",
+    "developer": "разработчик",
+    "reviewer": "ревьюер",
+}
+
+
+def dump_config(args: list[str]) -> int:
+    role = "analyst"
+    for i, arg in enumerate(args):
+        if arg == "--patch" and i + 1 < len(args):
+            stem = Path(args[i + 1]).stem
+            if stem in MARKS:
+                role = stem
+                break
+    write = "false" if role == "reviewer" else "true"
+    print(f"""- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+  config:
+    personaPrefix: >-
+      Ты — {MARKS[role]}. Фейковая персона для тестов.
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+  config:
+    applyPatch: false
+    read: true
+    write: {write}
+    edit: {write}
+- id: tool-subagent
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: spawn
+    toolName: subagent
+  disabled: true
+- id: tool-subagent-fork
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: fork
+    toolName: subagent_fork
+  disabled: true
+- id: tool-workflow
+  name: '@deepseek-ai/dsh-tool-workflow'
+  disabled: true
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never""")
+    return 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print("0.2.2-rc.1")
+        return 0
+    if "--dump-config" in args:
+        return dump_config(args)
+
+    prompt = sys.stdin.read()
+    mode = os.environ.get("FAKE_DSH_MODE", "ok")
+    if mode == "timeout":
+        time.sleep(float(os.environ.get("FAKE_DSH_SLEEP", "10")))
+        marker = os.environ.get("FAKE_DSH_MARKER")
+        if marker:
+            Path(marker).write_text("child survived", encoding="utf-8")
+        return 0
+    if mode == "fail":
+        print("dsh: AUTH: нет ключа", file=sys.stderr)
+        return 1
+    session_id = "session-fake123"
+    print(json.dumps({"type": "session", "sessionId": session_id, "cwd": "."}, ensure_ascii=False))
+    print(json.dumps({"type": "text", "text": "промежуточный текст"}, ensure_ascii=False))
+    if mode == "empty":
+        text = ""
+    elif mode == "bad_reason":
+        text = "ответ без завершения"
+    elif mode == "error_event":
+        text = ""
+    else:
+        text = (
+            f"FAKE_DSH_ARGS: {' '.join(args)}\n"
+            f"FAKE_DSH_PROMPT: {prompt}\n"
+            f"FAKE_DSH_KEY: {os.environ.get('DEEPSEEK_API_KEY', '')}"
+        )
+    if mode == "error_event":
+        reason = {"kind": "error", "error": {"code": "PROVIDER", "message": "провайдер недоступен"}}
+        rc = 1
+    elif mode == "bad_reason":
+        reason = {"kind": "aborted"}
+        rc = 1
+    else:
+        reason = {"kind": "completed"}
+        rc = 0
+    print(json.dumps(
+        {"type": "final", "sessionId": session_id, "reason": reason, "text": text},
+        ensure_ascii=False,
+    ))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# aidevteam — единственная точка входа. Запускает CLI в текущем шелле;
+# нужен python3 и бэкенд агентов (dsh или opencode) на хосте.
+# Окружение создаётся при первом запуске.
+# AIDEVTEAM_DOCKER=1 — запуск в контейнере (образ выбирается по agents.backend).
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Desktop-приложение кладёт CLI рядом с собой; не требуем ручной PATH-настройки.
+# Явный agents.dsh.bin в aidevteam.toml важнее этого удобства.
+DSH_CONFIG_BIN=""
+if [ -f "$ROOT/aidevteam.toml" ]; then
+  DSH_CONFIG_BIN="$(awk '
+    /^\[agents\.dsh\]/ { in_dsh = 1; next }
+    /^\[/              { in_dsh = 0 }
+    in_dsh && /^[[:space:]]*bin[[:space:]]*=/ {
+      line = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", line)
+      sub(/".*$/, "", line)
+      print line
+      exit
+    }
+  ' "$ROOT/aidevteam.toml")"
+fi
+if [ -z "${AIDEVTEAM_DSH_BIN:-}" ] \
+   && { [ -z "$DSH_CONFIG_BIN" ] || [ "$DSH_CONFIG_BIN" = "dsh" ]; } \
+   && [ -x "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" ]; then
+  export AIDEVTEAM_DSH_BIN="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+fi
+
+BACKEND="${AIDEVTEAM_AGENTS_BACKEND:-}"
+if [ -z "$BACKEND" ] && [ -f "$ROOT/aidevteam.toml" ]; then
+  BACKEND="$(awk '
+    /^\[agents\]/ { in_agents = 1; next }
+    /^\[/          { in_agents = 0 }
+    in_agents && /^[[:space:]]*backend[[:space:]]*=/ {
+      line = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", line)
+      sub(/".*$/, "", line)
+      print line
+      exit
+    }
+  ' "$ROOT/aidevteam.toml")"
+fi
+BACKEND="${BACKEND:-dsh}"
+BACKEND="$(printf '%s' "$BACKEND" | tr '[:upper:]' '[:lower:]')"
+
+if [ "${AIDEVTEAM_DOCKER:-0}" != "1" ]; then
+  VENV="$ROOT/.aidevteam/venv"
+  if [ ! -x "$VENV/bin/python" ]; then
+    echo "⏵ первый запуск: создаю окружение…"
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install -q -e "$ROOT/orchestrator[dev]"
+  fi
+  exec "$VENV/bin/python" -m aidevteam "$@"
+fi
+
+if [ "$BACKEND" = "dsh" ]; then
+  IMAGE="${AIDEVTEAM_DOCKER_IMAGE:-aidevteam-dsh:0.1.0}"
+  DOCKERFILE="$ROOT/docker/Dockerfile.dsh"
+else
+  IMAGE="${AIDEVTEAM_DOCKER_IMAGE:-aidevteam-runtime:0.1.1}"
+  DOCKERFILE="$ROOT/docker/Dockerfile"
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  echo "✘ AIDEVTEAM_DOCKER=1, но docker недоступен." >&2
+  exit 2
+fi
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "⏵ первый запуск: собираю образ $IMAGE (~1 мин)…"
+  docker build -q -t "$IMAGE" -f "$DOCKERFILE" "$ROOT"
+fi
+
+TTY_FLAGS=(); [ -t 0 ] && TTY_FLAGS=(-it)
+PORT_FLAGS=(); [ "${1:-}" = "app" ] && PORT_FLAGS=(-p "${APP_PORT:-3000}:${APP_PORT:-3000}")
+ENV_FLAGS=(-e "APP_PORT=${APP_PORT:-3000}")
+USER_FLAGS=()
+if [ "$BACKEND" = "dsh" ]; then
+  # DSH-контейнер работает от UID хоста: файлы в workspace остаются вашими.
+  mkdir -p "$ROOT/.aidevteam/dsh-home"
+  USER_FLAGS=(--user "$(id -u):$(id -g)")
+  MOUNT_FLAGS=(
+    -v "$ROOT:/workspace"
+  )
+  ENV_FLAGS+=(
+    -e "HOME=/tmp/aidevteam-home"
+    -e "DSH_HOME=/workspace/.aidevteam/dsh-home"
+    -e "npm_config_cache=/tmp/npm-cache"
+    -e "GIT_CONFIG_COUNT=1"
+    -e "GIT_CONFIG_KEY_0=safe.directory"
+    -e "GIT_CONFIG_VALUE_0=/workspace"
+  )
+  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+    ENV_FLAGS+=(-e DEEPSEEK_API_KEY)
+  fi
+else
+  MOUNT_FLAGS=(
+    -v "$ROOT:/workspace"
+    -v "$HOME/.local/share/opencode:/root/.local/share/opencode"
+    -v "$HOME/.config/opencode:/root/.config/opencode"
+  )
+fi
+
+exec docker run --rm \
+  ${TTY_FLAGS[@]+"${TTY_FLAGS[@]}"} ${PORT_FLAGS[@]+"${PORT_FLAGS[@]}"} \
+  ${USER_FLAGS[@]+"${USER_FLAGS[@]}"} \
+  ${MOUNT_FLAGS[@]+"${MOUNT_FLAGS[@]}"} ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} \
+  -w /workspace "$IMAGE" python -m aidevteam "$@"
