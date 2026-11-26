@@ -69,7 +69,10 @@ def _tool_version(cmd: list[str]) -> str | None:
     import subprocess
 
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        res = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
+        )
         return res.stdout.strip().splitlines()[0] if res.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired, IndexError):
         return None
@@ -475,7 +478,7 @@ def cmd_add(root: Path, args: list[str], ui: UI) -> int:
         if "--desc" in args:
             desc = args[args.index("--desc") + 1]
         d = taskmod.create_draft(root, title, desc, kind="story")
-        ui.plain(f"  ✔ История создана: {d.id} «{title}»")
+        ui.plain(f"  ✔ История создана: {d.id} «{d.title}»")
         ui.plain(f"    файл: {d.path.relative_to(root)} · kind: story")
         ui.plain("\n  История не готова без критериев исполнения (КИ).")
         ui.plain(f"    → aidevteam refine {d.id}   обсудить и собрать КИ с аналитиком")
@@ -490,7 +493,7 @@ def cmd_add(root: Path, args: list[str], ui: UI) -> int:
         if "--desc" in args:
             desc = args[args.index("--desc") + 1]
         d = taskmod.create_draft(root, title, desc)
-        ui.plain(f"  ✔ Черновик создан: {d.id} «{title}»")
+        ui.plain(f"  ✔ Черновик создан: {d.id} «{d.title}»")
         ui.plain(f"    файл: {d.path.relative_to(root)} · статус: draft")
         if not desc:
             ui.plain("\n  ⚠ Без деталей аналитик отложит черновик и задаст вопросы.")

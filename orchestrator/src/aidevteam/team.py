@@ -90,7 +90,8 @@ def opencode_probe(root: Path) -> bool:
     try:
         res = subprocess.run(
             [opencode_bin(), "--version"], cwd=root,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
         )
         return res.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -104,7 +105,8 @@ def dsh_version(cfg: Config, root: Path | None = None) -> str | None:
     try:
         res = subprocess.run(
             [binary, "--version"], cwd=root,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -183,7 +185,8 @@ def _run_opencode(
     cmd += ["--", prompt]
     try:
         res = subprocess.run(
-            cmd, cwd=root, capture_output=True, text=True, timeout=timeout
+            cmd, cwd=root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout
         )
     except subprocess.TimeoutExpired:
         return AgentResult(False, "", None, f"таймаут этапа ({timeout}s)")
@@ -296,7 +299,8 @@ def dsh_composition(root: Path, cfg: Config, role: str) -> tuple[str, str]:
         res = subprocess.run(
             [binary, "--profile", cfg.dsh_profile, "--patch", str(role_file),
              "--dump-config"],
-            cwd=root, capture_output=True, text=True, timeout=120, env=env,
+            cwd=root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return "", str(exc)[:300]
@@ -430,7 +434,8 @@ def _run_dsh(
     try:
         proc = subprocess.Popen(
             cmd, cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, env=env, start_new_session=True,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+            env=env, start_new_session=True,
         )
     except OSError as exc:
         return AgentResult(False, "", None, str(exc))

@@ -99,6 +99,12 @@ if [ "$BACKEND" = "dsh" ]; then
   ENV_FLAGS+=(
     -e "HOME=/tmp/aidevteam-home"
     -e "DSH_HOME=/workspace/.aidevteam/dsh-home"
+    # локаль контейнера — POSIX: без этого Python читает stdin из TTY как ascii
+    # и превращает кириллицу в суррогаты, на которых падает запись файлов
+    -e "LANG=C.UTF-8"
+    -e "LC_ALL=C.UTF-8"
+    -e "PYTHONUTF8=1"
+    -e "PYTHONIOENCODING=utf-8"
     # код оркестратора берём из смонтированного workspace (образ даёт зависимости
     # и dsh): правки в orchestrator/ не требуют пересборки образа
     -e "PYTHONPATH=/workspace/orchestrator/src"

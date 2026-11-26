@@ -6,7 +6,8 @@ from pathlib import Path
 
 def run_git(root: Path, *args: str, check: bool = True) -> str:
     res = subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True
+        ["git", *args], cwd=root, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     if check and res.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)}: {res.stderr.strip()}")
@@ -63,6 +64,7 @@ def try_push(root: Path) -> str:
     if "origin" not in remotes:
         return "skipped: нет origin"
     res = subprocess.run(
-        ["git", "push", "origin", "HEAD"], cwd=root, capture_output=True, text=True
+        ["git", "push", "origin", "HEAD"], cwd=root, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     return "ok" if res.returncode == 0 else f"skipped: {res.stderr.strip()[:80]}"

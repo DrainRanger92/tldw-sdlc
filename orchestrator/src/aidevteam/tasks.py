@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from aidevteam.text import clean_text
+
 _TRANSLIT = str.maketrans(
     "абвгдеёжзийклмнопрстуфхцчшщъыьэюя ",
     "abvgdeejziyklmnoprstufhccss_y_eua-",
@@ -348,6 +350,7 @@ def next_draft_id(root: Path) -> str:
 
 
 def create_draft(root: Path, title: str, desc: str = "", kind: str = "task") -> Draft:
+    title, desc = clean_text(title), clean_text(desc)
     did = next_draft_id(root)
     slug = title.lower().translate(_TRANSLIT)
     slug = re.sub(r"[^a-z0-9-]", "", slug)[:40] or "draft"
@@ -358,7 +361,14 @@ def create_draft(root: Path, title: str, desc: str = "", kind: str = "task") -> 
     )
     if kind == "story":
         body += "\n## Критерии исполнения\n(пока пусто — соберите через aidevteam refine)\n"
-    path.write_text(body, encoding="utf-8")
+    # временный файл + replace: сбой записи не оставляет пустой черновик
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     return Draft(did, title, "draft", path, desc, [], kind, [])
 
 

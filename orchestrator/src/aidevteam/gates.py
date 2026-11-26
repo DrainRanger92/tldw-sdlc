@@ -52,7 +52,10 @@ def check_learn_paths(changed: list[str]) -> GateResult:
 
 def run_command(name: str, cmd: list[str], cwd: Path, timeout: int) -> GateResult:
     try:
-        res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        res = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return GateResult(name, False, str(exc)[:200])
     detail = (res.stdout + res.stderr).strip()[-300:]
