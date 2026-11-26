@@ -27,6 +27,25 @@ COMMANDS: dict[str, str] = {
 }
 
 
+def _force_utf8_stdio(streams=None) -> None:
+    """UTF-8 для stdin/stdout/stderr, битые байты заменяются, а не валят ввод.
+
+    PYTHONIOENCODING=utf-8 без обработчика делал stdin строгим: неполный
+    UTF-8-байт с терминала (оборванная вставка, IME) валил ответ в диалоге с
+    `UnicodeDecodeError`. В UTF-8-режиме по умолчанию ошибки — surrogateescape,
+    их восстанавливает `text.clean_text`; здесь дополнительно гарантируем, что
+    ни один поток не поднимет исключение на битом байте.
+    """
+    for stream in streams if streams is not None else (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aidevteam", add_help=False)
     p.add_argument("--version", action="store_true")
@@ -52,6 +71,7 @@ def suggest(cmd: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     ns = build_parser().parse_args(argv)
     if ns.version:
         print(f"aidevteam {__version__}")
