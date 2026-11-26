@@ -23,8 +23,15 @@ def test_layers_are_importable_packages(layer: str) -> None:
     assert module.__doc__, f"у слоя {layer} должно быть описание"
 
 
+class _UnusedService:
+    """Заглушка сервиса: router собирается без обработки ссылок."""
+
+    def process(self, url: str) -> None:
+        raise AssertionError("сервис не должен вызываться в тесте сборки")
+
+
 def test_root_router_is_named_tldw() -> None:
-    assert create_router().name == "tldw"
+    assert create_router(_UnusedService()).name == "tldw"
 
 
 def test_ensure_data_dir_creates_nested_directory(tmp_path: Path) -> None:
@@ -46,6 +53,22 @@ def test_build_application_from_env(fake_env: dict[str, str]) -> None:
         assert application.settings is settings
         assert "tldw" in {router.name for router in application.dispatcher.sub_routers}
         assert settings.data_dir.is_dir()
+    finally:
+        asyncio.run(application.close())
+
+
+def test_build_application_uses_injected_summary_service(
+    fake_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken_service(settings: object) -> None:
+        raise AssertionError("реальные адаптеры не должны собираться")
+
+    monkeypatch.setattr("tldw.bootstrap.build_summary_service", broken_service)
+
+    application = build_application(load_settings(fake_env), summary_service=_UnusedService())
+    try:
+        assert "tldw" in {router.name for router in application.dispatcher.sub_routers}
     finally:
         asyncio.run(application.close())
 

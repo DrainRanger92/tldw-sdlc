@@ -53,6 +53,12 @@ def test_ruff_configuration_is_present() -> None:
     assert pyproject["tool"]["ruff"]["lint"]["select"]
 
 
+def test_package_version_matches_project_metadata() -> None:
+    import tldw
+
+    assert tldw.__version__ == _pyproject()["project"]["version"]
+
+
 def test_env_example_lists_every_app_variable_without_secrets() -> None:
     values = read_env_file(APP_DIR / ".env.example")
 
