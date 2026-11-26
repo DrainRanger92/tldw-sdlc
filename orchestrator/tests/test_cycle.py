@@ -202,3 +202,34 @@ def test_version_stage_bumps_app_pyproject(repo, monkeypatch):
     text = (repo / "app" / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.2.0"' in text
     assert "0.2.0" in (repo / "app" / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
+def test_version_stage_syncs_package_dunder_version(repo, monkeypatch):
+    monkeypatch.setenv("AIDEVTEAM_OPENCODE_BIN", FAKE_OPENCODE)
+    pkg = repo / "app" / "tldw"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('__version__ = "0.1.0"\n')
+    (repo / "app" / "pyproject.toml").write_text(
+        '[project]\nname = "tldw"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    gitops.commit_all(repo, "seed version pair", "x", "x@x")
+    agent, _ = make_agent(repo)
+    assert run_cycle(repo, Config(), UI(), agent=agent) == 0
+    assert '__version__ = "0.2.0"' in (pkg / "__init__.py").read_text(encoding="utf-8")
+
+
+def test_version_stage_fails_when_gates_go_red_after_bump(repo, monkeypatch):
+    monkeypatch.setenv("AIDEVTEAM_OPENCODE_BIN", FAKE_OPENCODE)
+    app = repo / "app"
+    (app / "pyproject.toml").write_text(
+        '[project]\nname = "tldw"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (app / "test_version_locked.py").write_text(
+        "def test_version_locked():\n"
+        "    text = open('pyproject.toml', encoding='utf-8').read()\n"
+        "    assert 'version = \"0.1.0\"' in text\n"
+    )
+    gitops.commit_all(repo, "seed locked version", "x", "x@x")
+    agent, _ = make_agent(repo)
+    assert run_cycle(repo, Config(), UI(), agent=agent) == 2
+    assert "VERSION" in read_failure(repo).upper()

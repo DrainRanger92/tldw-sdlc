@@ -365,6 +365,17 @@ def run_cycle(root: Path, cfg: Config, ui: UI, agent=team.run_agent) -> int:
                 )
                 if new_version:
                     st.ok(f"app v{new_version} · запись в app/CHANGELOG.md")
+                    # VERIFY уже прошёл до bump: проверяем состояние, которое
+                    # реально уйдёт в коммит (версия в двух файлах, тесты)
+                    after = app_gates(root / "app", cfg.stage_timeout_sec)
+                    red = [g for g in after if not g.ok]
+                    if red:
+                        st.fail("гейты после bump: " + "; ".join(g.name for g in red))
+                        raise AidevteamFailure(
+                            "VERSION",
+                            "после смены версии гейты красные: "
+                            + "; ".join(f"{g.name}: {g.detail[:120]}" for g in red),
+                        )
                 else:
                     st.off("app/package.json | pyproject.toml ещё нет — версия не меняется")
         else:
@@ -509,6 +520,7 @@ def bump_app_version(root: Path, cycle_no: int, done: list[tuple[str, str]]) -> 
         pyproject_file.write_text(text, encoding="utf-8")
     else:
         return None
+    _sync_package_version(root, new)
     ch = root / "app" / "CHANGELOG.md"
     entry = (
         f"## {new} — цикл {cycle_no}, {date.today().isoformat()}\n\n"
@@ -526,6 +538,25 @@ def bump_app_version(root: Path, cycle_no: int, done: list[tuple[str, str]]) -> 
         text = "# Changelog\n\n" + entry
     ch.write_text(text, encoding="utf-8")
     return new
+
+
+def _sync_package_version(root: Path, version: str) -> None:
+    """Держать `__version__` пакета приложения в ногу с метаданными.
+
+    Иначе после bump версии `pyproject.toml` и `tldw/__init__.py` расходятся,
+    и тест согласованности версий падает уже после коммита.
+    """
+    for init in sorted((root / "app").glob("*/__init__.py")):
+        if any(part in (".venv", "site-packages", "build", "dist") for part in init.parts):
+            continue
+        text = init.read_text(encoding="utf-8")
+        m = re.search(r'(?m)^(__version__\s*=\s*")([^"]*)(")', text)
+        if m is None or m.group(2) == version:
+            continue
+        init.write_text(
+            text[: m.start()] + m.group(1) + version + m.group(3) + text[m.end():],
+            encoding="utf-8",
+        )
 
 
 def _next_minor(version: str) -> str:
