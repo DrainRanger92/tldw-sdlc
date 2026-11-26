@@ -77,3 +77,9 @@ def test_data_directory_is_gitignored() -> None:
     if root_ignore_path.exists():
         root_ignore = root_ignore_path.read_text(encoding="utf-8").splitlines()
         assert "app/data/" in {line.strip() for line in root_ignore}
+
+
+def test_llm_prompt_and_template_are_declared_as_package_data() -> None:
+    package_data = _pyproject()["tool"]["setuptools"]["package-data"]
+
+    assert "adapters/resources/*.md" in package_data["tldw"]

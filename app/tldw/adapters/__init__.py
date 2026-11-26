@@ -4,6 +4,19 @@
 подменять его фейковой реализацией без сети и токенов.
 """
 
+from .llm import (
+    LLMClient,
+    LLMError,
+    LLMProviderError,
+    LLMResponseError,
+    LLMTimeoutError,
+    SummaryQuote,
+    SummaryTimelineEntry,
+    VideoSummary,
+    build_system_prompt,
+    build_user_prompt,
+    parse_summary,
+)
 from .youtube import (
     DEFAULT_LANGUAGES,
     SOURCE_TRANSCRIPT_API,
@@ -28,20 +41,31 @@ from .youtube import (
 __all__ = [
     "DEFAULT_LANGUAGES",
     "FallbackClient",
+    "LLMClient",
+    "LLMError",
+    "LLMProviderError",
+    "LLMResponseError",
+    "LLMTimeoutError",
     "NoTranscriptError",
     "NotYouTubeURLError",
     "SOURCE_TRANSCRIPT_API",
     "SOURCE_YTDLP",
+    "SummaryQuote",
+    "SummaryTimelineEntry",
     "Transcript",
     "TranscriptApiClient",
     "TranscriptClient",
     "TranscriptSegment",
     "Video",
     "VideoMetadata",
+    "VideoSummary",
     "VideoUnavailableError",
     "YouTubeAdapter",
     "YouTubeAdapterError",
     "YouTubeNetworkError",
     "YtDlpClient",
+    "build_system_prompt",
+    "build_user_prompt",
+    "parse_summary",
     "parse_video_id",
 ]
