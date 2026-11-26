@@ -6,6 +6,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Docker Desktop кладёт CLI в ~/.docker/bin: в bash (в отличие от интерактивного
+# zsh) этого каталога в PATH нет — без него AIDEVTEAM_DOCKER=1 не работает.
+if ! command -v docker >/dev/null 2>&1 && [ -x "$HOME/.docker/bin/docker" ]; then
+  export PATH="$HOME/.docker/bin:$PATH"
+fi
+
 # Desktop-приложение кладёт CLI рядом с собой; не требуем ручной PATH-настройки.
 # Явный agents.dsh.bin в aidevteam.toml важнее этого удобства.
 DSH_CONFIG_BIN=""
@@ -81,7 +87,7 @@ fi
 
 TTY_FLAGS=(); [ -t 0 ] && TTY_FLAGS=(-it)
 PORT_FLAGS=(); [ "${1:-}" = "app" ] && PORT_FLAGS=(-p "${APP_PORT:-3000}:${APP_PORT:-3000}")
-ENV_FLAGS=(-e "APP_PORT=${APP_PORT:-3000}")
+ENV_FLAGS=(-e "APP_PORT=${APP_PORT:-3000}" -e "AIDEVTEAM_IN_DOCKER=1")
 USER_FLAGS=()
 if [ "$BACKEND" = "dsh" ]; then
   # DSH-контейнер работает от UID хоста: файлы в workspace остаются вашими.
@@ -93,6 +99,9 @@ if [ "$BACKEND" = "dsh" ]; then
   ENV_FLAGS+=(
     -e "HOME=/tmp/aidevteam-home"
     -e "DSH_HOME=/workspace/.aidevteam/dsh-home"
+    # код оркестратора берём из смонтированного workspace (образ даёт зависимости
+    # и dsh): правки в orchestrator/ не требуют пересборки образа
+    -e "PYTHONPATH=/workspace/orchestrator/src"
     -e "npm_config_cache=/tmp/npm-cache"
     -e "GIT_CONFIG_COUNT=1"
     -e "GIT_CONFIG_KEY_0=safe.directory"

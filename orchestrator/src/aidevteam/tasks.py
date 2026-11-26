@@ -70,7 +70,9 @@ def load_tasks(root: Path) -> list[Task]:
         bucket = "backlog"
         cur: Task | None = None
         section = ""
-        for line in f.read_text(encoding="utf-8").splitlines():
+        # комментарии описывают формат — это не задачи
+        text = re.sub(r"<!--.*?-->", "", f.read_text(encoding="utf-8"), flags=re.S)
+        for line in text.splitlines():
             if m := _SECTION_RE.match(line):
                 bucket = BUCKETS[m.group(1)]
             elif m := _TASK_RE.match(line):

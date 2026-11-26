@@ -69,6 +69,18 @@ def test_doctor_ok_with_roles(repo, monkeypatch):
     assert "Все обязательные компоненты на месте" in out
 
 
+def test_doctor_inside_docker_skips_docker_check(repo, monkeypatch):
+    monkeypatch.setenv("AIDEVTEAM_OPENCODE_BIN", FAKE_OPENCODE)
+    monkeypatch.setenv("AIDEVTEAM_IN_DOCKER", "1")
+    agents = repo / ".opencode" / "agent"
+    agents.mkdir(parents=True)
+    for role in ("analyst", "planner", "developer", "reviewer"):
+        (agents / f"{role}.md").write_text("---\ndescription: x\n---\n")
+    code, out = run(repo, "doctor")
+    assert code == 0, out
+    assert "запуск в контейнере" in out
+
+
 def test_add_story_creates_story_draft(repo):
     code, out = run(repo, "add", "story", "Как пользователь, я хочу экспорт")
     assert code == 0

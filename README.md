@@ -50,9 +50,20 @@ cp .env.example .env
 Приложению нужен свой интерпретатор: стек и команды описаны в `app/AGENTS.md`.
 
 Запуск в контейнере: `AIDEVTEAM_DOCKER=1 ./aidevteam …` — для DSH собирается
-образ из `docker/Dockerfile.dsh` (Node 24, `@deepseek-ai/dsh`), профиль и сессии
-живут в томе `.aidevteam/dsh-home`. Ревьюер в контейнере работает в read-only
-песочнице; если ядро/контейнер не поддерживает sandbox-local, поставьте
+образ из `docker/Dockerfile.dsh` (Python 3.12 + Node 24 + `@deepseek-ai/dsh`).
+Первый запуск собирает образ сам (несколько минут, ~2,8 ГБ), профиль и сессии
+DSH живут в `.aidevteam/dsh-home` на хосте. Код оркестратора читается из
+смонтированного workspace (`PYTHONPATH=/workspace/orchestrator/src`), поэтому
+правки в `orchestrator/` не требуют пересборки; пересобирать нужно только при
+смене зависимостей или версии DSH:
+
+```bash
+docker image rm aidevteam-dsh:0.1.0   # следующий AIDEVTEAM_DOCKER=1 соберёт заново
+```
+
+CLI Docker Desktop лежит в `~/.docker/bin` — wrapper добавляет его в `PATH`, если
+`docker` не найден. Ревьюер в контейнере работает в read-only песочнице; если
+ядро/контейнер не поддерживает sandbox-local, поставьте
 `agents.dsh.reviewer_permission_mode = "danger-full-access"` — неизменность
 worktree всё равно проверит цикл.
 

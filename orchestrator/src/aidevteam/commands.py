@@ -172,8 +172,11 @@ def cmd_doctor(root: Path, args: list[str], ui: UI) -> int:
             "ревьюер: read-only песочница",
             f"ревьюер: permission_mode={cfg.dsh_reviewer_permission_mode!r} — запись возможна")
     docker_ok = _tool_version(["docker", "info", "--format", "ok"]) is not None
-    opt(docker_ok, "docker доступен (опционально: AIDEVTEAM_DOCKER=1 — запуск в изоляции)",
-        "docker недоступен — штатный режим, запуск идёт в текущем шелле")
+    if os.environ.get("AIDEVTEAM_IN_DOCKER"):
+        opt(True, "запуск в контейнере (docker CLI внутри не нужен)", "")
+    else:
+        opt(docker_ok, "docker доступен (опционально: AIDEVTEAM_DOCKER=1 — запуск в изоляции)",
+            "docker недоступен — штатный режим, запуск идёт в текущем шелле")
 
     ui.plain("")
     if ok:

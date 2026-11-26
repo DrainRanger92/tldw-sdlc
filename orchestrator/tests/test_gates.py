@@ -1,8 +1,10 @@
 import json
+import sys
 
 from aidevteam.config import Config
 from aidevteam.gates import (
     app_gates,
+    app_python,
     app_smoke,
     check_learn_paths,
     check_protected,
@@ -102,3 +104,12 @@ def test_app_smoke_python_syntax_error(tmp_path):
     (tmp_path / "main.py").write_text("def broken(:\n")
     res = app_smoke(tmp_path)
     assert not res.ok and "smoke" in res.name
+
+
+def test_app_python_falls_back_when_venv_does_not_run(tmp_path):
+    bindir = tmp_path / ".venv" / "bin"
+    bindir.mkdir(parents=True)
+    fake = bindir / "python"
+    fake.write_text("#!/bin/sh\nexit 1\n")
+    fake.chmod(0o755)
+    assert app_python(tmp_path) == sys.executable

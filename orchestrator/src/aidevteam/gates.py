@@ -87,12 +87,23 @@ def is_python_app(app_dir: Path) -> bool:
 
 
 def app_python(app_dir: Path) -> str:
-    """Интерпретатор приложения: его собственный venv, если он есть."""
+    """Интерпретатор приложения: его собственный venv, если он здесь запускается."""
     for rel in (".venv/bin/python", "venv/bin/python"):
         candidate = app_dir / rel
-        if candidate.exists():
+        if candidate.exists() and _interpreter_runs(candidate):
             return str(candidate)
     return sys.executable
+
+
+def _interpreter_runs(python: Path) -> bool:
+    """venv, собранный на другой ОС (macOS-venv в Linux-контейнере), не запускается."""
+    try:
+        res = subprocess.run(
+            [str(python), "-c", "import sys"], capture_output=True, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return res.returncode == 0
 
 
 def _python_tests(app_dir: Path) -> list[str]:

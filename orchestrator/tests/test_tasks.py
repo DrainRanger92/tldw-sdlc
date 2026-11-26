@@ -259,3 +259,14 @@ def test_lint_task_like_heading_without_format(repo):
     )
     problems = lint(repo)
     assert any("004-bad" in p and "не распарсились" in p for p in problems)
+
+
+def test_lint_ignores_commented_task_example(repo):
+    f = repo / "specs" / "001-mvp" / "tasks.md"
+    f.write_text(
+        "# Задачи\n\n<!--\n### T-009: пример формата\n- тип: app\n-->\n\n"
+        "## Текущий инкремент\n\n## Бэклог\n",
+        encoding="utf-8",
+    )
+    assert lint(repo) == []
+    assert load_tasks(repo) == []
