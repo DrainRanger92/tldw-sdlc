@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aidevteam import team
 from aidevteam import tasks as taskmod
+from aidevteam.text import clean_text
 from aidevteam.ui import UI
 
 _INTAKE_PROMPT = (
@@ -91,7 +92,7 @@ def dialog(root: Path, ui: UI, draft, agent=team.run_agent, input_fn=input) -> i
             ui.plain("\n  Сессия прервана — прогресс сохранён в черновике.")
             ui.plain(f"  Продолжить: aidevteam refine {draft.id}")
             return 0
-        message = answer.strip() or "на усмотрение команды"
+        message = clean_text(answer.strip()) or "на усмотрение команды"
 
 
 def cmd_refine(root: Path, args: list[str], ui: UI) -> int:
