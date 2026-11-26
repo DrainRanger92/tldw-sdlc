@@ -71,5 +71,20 @@ T-006/T-008, где адаптер начнёт работать на польз
 - P2 — в T-005 (дублирование и тесты) и при следующем касании `llm.py`;
 - P3 — при синхронизации версии и шаблона.
 
-См. также `tldw-baseline-after-t004.md`, `review-debt-accumulates.md`,
-`cycle-04-spend.md`.
+## Статус на цикл 5 (после T-005)
+
+Проверено по коду:
+
+- **закрыто:** `MAX_FOLLOW_UPS` больше не входит в `__all__` `llm.py`;
+- **открыто (P1):** `httpx.InvalidURL` по-прежнему вылетает мимо `LLMError` —
+  в `LLMClient` ловится только `httpx.HTTPError`; отсутствующий ресурс
+  промпта/маркера по-прежнему даёт `RuntimeError`. Оба пункта переходят в
+  T-006/T-008;
+- **открыто (P2):** `_one_line` остаётся в трёх копиях (`services/note.py`,
+  `adapters/youtube.py`, `adapters/llm.py`); `format_timecode` — единственная
+  копия, T-005 импортировала её из `services.note` вместо четвёртой;
+- **не проверялось:** покрытие лимита `timeline`, конструктор и отсутствие
+  ресурса в тестах; prompt injection и версии/CHANGELOG — без изменений.
+
+См. также `t005-review-issues.md`, `tldw-baseline-after-t004.md`,
+`review-debt-accumulates.md`, `cycle-04-spend.md`.
