@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 from pathlib import Path
 
 import pytest
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 
 from tldw.bootstrap import Application, build_application
 from tldw.config import load_settings
@@ -78,3 +79,62 @@ def test_close_is_safe_to_call_twice(fake_env: dict[str, str]) -> None:
 
     asyncio.run(application.close())
     asyncio.run(application.close())
+
+
+def test_build_application_forwards_allowlist_to_router(
+    fake_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, tuple[int, ...]] = {}
+
+    def recording_create_router(
+        service: object,
+        *,
+        allowed_user_ids: tuple[int, ...] = (),
+    ) -> Router:
+        captured["allowed_user_ids"] = allowed_user_ids
+        return Router(name="tldw")
+
+    monkeypatch.setattr("tldw.bootstrap.create_router", recording_create_router)
+    settings = load_settings({**fake_env, "TELEGRAM_ALLOWED_USER_IDS": "42, 1001"})
+
+    application = build_application(settings, summary_service=_UnusedService())
+    try:
+        assert captured["allowed_user_ids"] == (42, 1001)
+    finally:
+        asyncio.run(application.close())
+
+
+def test_empty_allowlist_logs_open_access_warning(
+    fake_env: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = load_settings(fake_env)
+    assert settings.allowed_user_ids == ()
+
+    with caplog.at_level(logging.WARNING, logger="tldw.access"):
+        application = build_application(settings)
+    try:
+        warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    finally:
+        asyncio.run(application.close())
+
+    assert warnings, "пустой allowlist должен давать предупреждение при старте"
+    assert "TELEGRAM_ALLOWED_USER_IDS" in warnings[0].getMessage()
+    assert "всем" in warnings[0].getMessage()
+
+
+def test_configured_allowlist_logs_no_warning(
+    fake_env: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = load_settings({**fake_env, "TELEGRAM_ALLOWED_USER_IDS": "1001"})
+
+    with caplog.at_level(logging.WARNING, logger="tldw.access"):
+        application = build_application(settings, summary_service=_UnusedService())
+    try:
+        warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    finally:
+        asyncio.run(application.close())
+
+    assert warnings == []

@@ -8,6 +8,8 @@
 - тяжёлый вызов сервиса выполняется в рабочем потоке и не блокирует loop;
 - текст без ссылки даёт подсказку про YouTube, а из нескольких ссылок
   обрабатывается первая;
+- доступ по allowlist: разрешённый ID обрабатывается, чужой получает «доступ
+  закрыт» до разбора ссылки и вызовов сервиса, пустой список пропускает всех;
 - ``.md`` лежит в ``DATA_DIR`` до отправки и уходит документом с именем
   из шаблона заметки.
 """
@@ -39,6 +41,7 @@ from tldw.adapters.youtube import (
 from tldw.config import load_settings
 from tldw.handlers import (
     MESSAGE_ACCEPTED,
+    MESSAGE_ACCESS_DENIED,
     MESSAGE_DONE,
     MESSAGE_FAILED,
     MESSAGE_NEED_LINK,
@@ -101,30 +104,34 @@ class Harness:
         await self.bot.session.close()
 
 
-def make_update(text: str, *, update_id: int = 1) -> Update:
+def make_update(
+    text: str,
+    *,
+    update_id: int = 1,
+    user_id: int = 42,
+    with_sender: bool = True,
+) -> Update:
     """Собрать апдейт с текстовым сообщением в приватном чате."""
-    return Update.model_validate(
-        {
-            "update_id": update_id,
-            "message": {
-                "message_id": 10,
-                "date": 0,
-                "chat": {"id": 42, "type": "private"},
-                "from": {"id": 42, "is_bot": False, "first_name": "Тест"},
-                "text": text,
-            },
-        }
-    )
+    message: dict[str, Any] = {
+        "message_id": 10,
+        "date": 0,
+        "chat": {"id": 42, "type": "private"},
+        "text": text,
+    }
+    if with_sender:
+        message["from"] = {"id": user_id, "is_bot": False, "first_name": "Тест"}
+    return Update.model_validate({"update_id": update_id, "message": message})
 
 
 def make_harness(
     service: SummaryProcessor,
     *,
+    allowed_user_ids: tuple[int, ...] = (),
     on_request: Callable[[Any], None] | None = None,
 ) -> Harness:
     session = FakeSession(on_request)
     bot = Bot(token=FAKE_BOT_TOKEN, session=session)
-    handler = LinkHandler(service)
+    handler = LinkHandler(service, allowed_user_ids=allowed_user_ids)
     router = Router(name="test-tldw")
     handler.register(router)
     dispatcher = Dispatcher()
@@ -136,14 +143,24 @@ def run_message(
     service: SummaryProcessor,
     text: str,
     *,
+    allowed_user_ids: tuple[int, ...] = (),
+    user_id: int = 42,
+    with_sender: bool = True,
     on_request: Callable[[Any], None] | None = None,
 ) -> list[Any]:
     """Пропустить сообщение через диспетчер и дождаться фоновой обработки."""
 
     async def scenario() -> list[Any]:
-        harness = make_harness(service, on_request=on_request)
+        harness = make_harness(
+            service,
+            allowed_user_ids=allowed_user_ids,
+            on_request=on_request,
+        )
         try:
-            await harness.send(text)
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(text, user_id=user_id, with_sender=with_sender),
+            )
             await harness.handler.wait_idle()
         finally:
             await harness.close()
@@ -232,6 +249,65 @@ def test_text_without_link_asks_for_youtube_link(text: str) -> None:
     assert requests[0].text == MESSAGE_NEED_LINK
     assert "YouTube" in requests[0].text
     assert service.calls == []
+
+
+def test_allowed_user_id_is_processed(tmp_path: Path) -> None:
+    service = FakeSummaryService(result=make_result(tmp_path))
+
+    requests = run_message(service, YOUTUBE_URL, allowed_user_ids=(42, 1001), user_id=42)
+
+    assert service.calls == [YOUTUBE_URL]
+    assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
+    assert requests[0].text == MESSAGE_ACCEPTED
+
+
+def test_stranger_gets_access_denied_and_no_processing() -> None:
+    service = FakeSummaryService()
+
+    requests = run_message(service, YOUTUBE_URL, allowed_user_ids=(1001,), user_id=42)
+
+    assert request_types(requests) == [SendMessage]
+    assert requests[0].text == MESSAGE_ACCESS_DENIED
+    assert "доступ закрыт" in requests[0].text.lower()
+    assert service.calls == [], "чужой ID не должен запускать обработку видео"
+
+
+def test_access_is_checked_before_link_parsing() -> None:
+    """Посторонний без ссылки получает отказ, а не подсказку про YouTube."""
+    service = FakeSummaryService()
+
+    requests = run_message(
+        service, "привет, а что ты умеешь?", allowed_user_ids=(1001,), user_id=42
+    )
+
+    assert request_types(requests) == [SendMessage]
+    assert requests[0].text == MESSAGE_ACCESS_DENIED
+    assert requests[0].text != MESSAGE_NEED_LINK
+
+
+def test_message_without_sender_is_denied_when_allowlist_is_set() -> None:
+    """При заданном allowlist запрос без отправителя (канал) закрыт."""
+    service = FakeSummaryService()
+
+    requests = run_message(
+        service,
+        YOUTUBE_URL,
+        allowed_user_ids=(1001,),
+        with_sender=False,
+    )
+
+    assert request_types(requests) == [SendMessage]
+    assert requests[0].text == MESSAGE_ACCESS_DENIED
+    assert service.calls == []
+
+
+def test_empty_allowlist_lets_a_stranger_through(tmp_path: Path) -> None:
+    service = FakeSummaryService(result=make_result(tmp_path))
+
+    requests = run_message(service, YOUTUBE_URL, allowed_user_ids=(), user_id=777)
+
+    assert service.calls == [YOUTUBE_URL]
+    assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
 
 
 def test_first_link_in_text_is_processed(tmp_path: Path) -> None:

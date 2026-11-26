@@ -14,6 +14,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from tldw.access import describe_allowlist
 from tldw.bootstrap import Application, build_application
 from tldw.config import (
     CONFIG_HINT,
@@ -68,12 +69,6 @@ def _collect_environ(
     return env
 
 
-def _describe_allowlist(allowed_user_ids: tuple[int, ...]) -> str:
-    if not allowed_user_ids:
-        return "все пользователи"
-    return f"{len(allowed_user_ids)} ID"
-
-
 def _run_application(application: Application) -> None:
     """Запустить polling; вызов блокирующий."""
     application.run()
@@ -119,7 +114,7 @@ def main(
             "Конфигурация в порядке: приложение собрано "
             f"(модель LLM: {settings.llm_model}, "
             f"порог видео: {settings.max_video_duration_seconds} с, "
-            f"доступ: {_describe_allowlist(settings.allowed_user_ids)})."
+            f"доступ: {describe_allowlist(settings.allowed_user_ids)})."
         )
         return EXIT_OK
 
@@ -128,7 +123,7 @@ def main(
         "TLDW запускается: модель %s, порог видео %s с, доступ: %s",
         settings.llm_model,
         settings.max_video_duration_seconds,
-        _describe_allowlist(settings.allowed_user_ids),
+        describe_allowlist(settings.allowed_user_ids),
     )
     try:
         runner(application)

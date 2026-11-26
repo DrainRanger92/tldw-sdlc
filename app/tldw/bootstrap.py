@@ -15,6 +15,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from tldw.access import describe_allowlist, warn_if_open_access
 from tldw.config import Settings
 from tldw.handlers import SummaryProcessor, create_router
 from tldw.services.summary import SummaryService
@@ -70,15 +71,22 @@ def build_application(
         по умолчанию собирается на реальных адаптерах.
     :raises OSError: если каталог данных из конфига нельзя создать.
     """
+    warn_if_open_access(settings.allowed_user_ids)
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dispatcher = Dispatcher()
     service = build_summary_service(settings) if summary_service is None else summary_service
-    dispatcher.include_router(create_router(service))
+    dispatcher.include_router(
+        create_router(service, allowed_user_ids=settings.allowed_user_ids)
+    )
     ensure_data_dir(settings.data_dir)
-    log.debug("Приложение собрано: модель LLM %s", settings.llm_model)
+    log.debug(
+        "Приложение собрано: модель LLM %s, доступ: %s",
+        settings.llm_model,
+        describe_allowlist(settings.allowed_user_ids),
+    )
     return Application(settings=settings, bot=bot, dispatcher=dispatcher)
 
 

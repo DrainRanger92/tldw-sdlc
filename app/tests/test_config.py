@@ -119,12 +119,31 @@ def test_invalid_bot_token_format_is_rejected(fake_env: dict[str, str], token: s
     assert "формат" in message
 
 
-@pytest.mark.parametrize("value", ["alice", "10, -5", "12.5", "0"])
-def test_invalid_allowlist_is_rejected(fake_env: dict[str, str], value: str) -> None:
+@pytest.mark.parametrize("value", ["alice", "10, -5", "12.5"])
+def test_non_numeric_allowlist_is_rejected(fake_env: dict[str, str], value: str) -> None:
     env = {**fake_env, "TELEGRAM_ALLOWED_USER_IDS": value}
 
-    with pytest.raises(ConfigError, match="TELEGRAM_ALLOWED_USER_IDS"):
+    with pytest.raises(ConfigError) as exc_info:
         load_settings(env)
+
+    message = str(exc_info.value)
+    assert "TELEGRAM_ALLOWED_USER_IDS" in message
+    assert "user ID" in message
+    assert "запятую" in message
+
+
+def test_non_positive_allowlist_is_rejected(fake_env: dict[str, str]) -> None:
+    env = {**fake_env, "TELEGRAM_ALLOWED_USER_IDS": "0"}
+
+    with pytest.raises(ConfigError, match="положительным"):
+        load_settings(env)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_allowlist_means_open_access(fake_env: dict[str, str], value: str) -> None:
+    settings = load_settings({**fake_env, "TELEGRAM_ALLOWED_USER_IDS": value})
+
+    assert settings.allowed_user_ids == ()
 
 
 def test_invalid_allowlist_error_does_not_echo_value(fake_env: dict[str, str]) -> None:

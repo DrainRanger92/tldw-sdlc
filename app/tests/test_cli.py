@@ -122,6 +122,42 @@ def test_explicit_missing_env_file_is_a_config_error(
     assert "не найден" in captured.err
 
 
+def test_invalid_allowlist_stops_startup_with_clear_error(
+    fake_env: dict[str, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    started: list[Application] = []
+    env = {**fake_env, "TELEGRAM_ALLOWED_USER_IDS": "alice, bob"}
+
+    exit_code = main(
+        ["--env-file", str(_empty_env_file(tmp_path))],
+        environ=env,
+        run_application=started.append,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_CONFIG_ERROR
+    assert "TELEGRAM_ALLOWED_USER_IDS" in captured.err
+    assert "user ID" in captured.err
+    assert "Traceback" not in captured.err
+    assert started == [], "бот не должен запускаться с некорректным allowlist"
+
+
+def test_check_config_reports_allowlist_size(
+    fake_env: dict[str, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = {**fake_env, "TELEGRAM_ALLOWED_USER_IDS": "1001, 1002"}
+
+    exit_code = main(
+        ["--check-config", "--env-file", str(_empty_env_file(tmp_path))],
+        environ=env,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_OK
+    assert "доступ: 2 ID" in captured.out
+    assert "1001" not in captured.out, "ID не должны попадать в вывод"
+
+
 def test_main_builds_application_for_startup(fake_env: dict[str, str], tmp_path: Path) -> None:
     started: list[Application] = []
 

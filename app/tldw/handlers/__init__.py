@@ -6,6 +6,7 @@
 
 from tldw.handlers.link import (
     MESSAGE_ACCEPTED,
+    MESSAGE_ACCESS_DENIED,
     MESSAGE_DONE,
     MESSAGE_FAILED,
     MESSAGE_NEED_LINK,
@@ -18,6 +19,7 @@ from tldw.handlers.link import (
 from tldw.handlers.router import create_router
 
 __all__ = [
+    "MESSAGE_ACCESS_DENIED",
     "MESSAGE_ACCEPTED",
     "MESSAGE_DONE",
     "MESSAGE_FAILED",
