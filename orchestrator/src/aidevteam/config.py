@@ -16,6 +16,24 @@ DEFAULT_PROTECTED = (
 SUPPORTED_BACKENDS = ("opencode", "dsh")
 
 
+def parse_model_spec(spec: str) -> tuple[str, str, str | None]:
+    """Разобрать `provider/model[@effort]` в (provider, model, reasoning effort).
+
+    Effort опционален: без него DSH передаёт дефолт провайдера. Допустимые
+    уровни задаёт каталог DSH для конкретной модели — неподдерживаемый уровень
+    DSH отклоняет на старте (UNSUPPORTED_REASONING_EFFORT), а не оркестратор.
+    """
+    base, at, effort = spec.partition("@")
+    if at and not effort.strip():
+        raise ValueError(f"пустой reasoning effort в {spec!r}")
+    if base.count("/") != 1:
+        raise ValueError(f"ожидается provider/model[@effort], получено {spec!r}")
+    provider, model = (part.strip() for part in base.split("/", 1))
+    if not provider or not model:
+        raise ValueError(f"пустой provider или model в {spec!r}")
+    return provider, model, (effort.strip() or None)
+
+
 @dataclass
 class Config:
     watch_interval_sec: int = 300
@@ -55,10 +73,10 @@ class Config:
                 f"получено: {self.agents_backend!r}"
             )
         for role, spec in self.agent_models.items():
-            if spec.count("/") != 1 or not all(spec.split("/", 1)):
-                raise ValueError(
-                    f"agents.models.{role}: ожидается provider/model, получено {spec!r}"
-                )
+            try:
+                parse_model_spec(spec)
+            except ValueError as exc:
+                raise ValueError(f"agents.models.{role}: {exc}") from None
 
     @classmethod
     def load(cls, root: Path) -> "Config":

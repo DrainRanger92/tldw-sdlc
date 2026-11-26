@@ -42,12 +42,15 @@ DSH с `read-only` падает закрыто: для такого окруже
 ```toml
 [agents.models]
 default  = "deepseek-official/deepseek-flash"
-reviewer = "deepseek-official/deepseek-reasoner"
+analyst  = "deepseek-official/deepseek-flash@high"
+reviewer = "deepseek-official/deepseek-flash@high"
 ```
 
-Оркестратор пишет `.aidevteam/dsh/model-<role>.yml` и передаёт его вторым
-`--patch`. Без записи в `[agents.models]` используется дефолт профиля DSH.
-Формат значения — `provider/model`.
+Оркестратор пишет `.aidevteam/dsh/model-<role>.yml` (строку `agent-default-model`
+с полями `provider`, `model` и, если задан, `reasoningEffort`) и передаёт его
+вторым `--patch`. Без записи в `[agents.models]` используется дефолт профиля DSH.
+Формат значения — `provider/model[@effort]`; допустимые уровни задаёт каталог DSH
+для конкретной модели, неподдерживаемый уровень отклоняется на старте.
 
 ## Проверка вручную
 

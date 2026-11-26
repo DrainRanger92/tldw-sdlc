@@ -156,6 +156,14 @@ def cmd_doctor(root: Path, args: list[str], ui: UI) -> int:
     req(not problems, "линт артефактов specs/ пройден",
         "линт артефактов: " + "; ".join(problems[:3]))
 
+    if backend == "dsh" and cfg.agent_models:
+        ui.plain("")
+        ui.plain("  Модели ролей")
+        for role in ("analyst", "planner", "developer", "reviewer"):
+            spec = cfg.agent_models.get(role) or cfg.agent_models.get("default")
+            if spec:
+                ui.plain(f"    {role:<10} {spec}")
+
     ui.plain("\nОпциональные")
     if backend == "dsh":
         opt(_has_dsh_key(root, cfg.dsh_env_file),

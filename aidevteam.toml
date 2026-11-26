@@ -19,9 +19,11 @@ push = "auto"
 backend = "dsh"
 
 [agents.models]
-# Формат: provider/model. Строка reviewer меняет модель ревьюера без правок кода.
+# Формат: provider/model[@effort]. Effort (off|low|high|max для deepseek-flash)
+# опущен — работает дефолт провайдера; роли без записи берут default.
 default = "deepseek-official/deepseek-flash"
-reviewer = "deepseek-official/deepseek-flash"
+analyst = "deepseek-official/deepseek-flash@high"
+reviewer = "deepseek-official/deepseek-flash@high"
 
 [agents.dsh]
 bin = "dsh"                 # или AIDEVTEAM_DSH_BIN; путь не обязан быть в проекте
