@@ -50,6 +50,12 @@ if [ "${AIDEVTEAM_DOCKER:-0}" != "1" ]; then
   if [ ! -x "$VENV/bin/python" ]; then
     echo "⏵ первый запуск: создаю окружение…"
     python3 -m venv "$VENV"
+  fi
+  # pip из stdlib бывает старым (PEP 660: editable install из pyproject.toml),
+  # поэтому обновляем его только когда пакет ещё не встал.
+  if ! "$VENV/bin/python" -c "import aidevteam" >/dev/null 2>&1; then
+    echo "⏵ устанавливаю aidevteam…"
+    "$VENV/bin/pip" install -q --upgrade pip setuptools
     "$VENV/bin/pip" install -q -e "$ROOT/orchestrator[dev]"
   fi
   exec "$VENV/bin/python" -m aidevteam "$@"
