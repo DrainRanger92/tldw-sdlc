@@ -113,6 +113,27 @@ if [ "$BACKEND" = "dsh" ]; then
     -e "GIT_CONFIG_KEY_0=safe.directory"
     -e "GIT_CONFIG_VALUE_0=/workspace"
   )
+  # git push из контейнера: приоритет — ssh-агент хоста (Docker Desktop
+  # проксирует его в /run/host-services/ssh-auth.sock, ключ в контейнер не
+  # попадает); если агент пуст, отдаём ~/.ssh только на чтение.
+  if [ -S /run/host-services/ssh-auth.sock ]; then
+    MOUNT_FLAGS+=(-v /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock)
+    ENV_FLAGS+=(-e SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock)
+  fi
+  # ssh внутри контейнера ищет UID хоста в /etc/passwd: без записи push падает
+  # с "No user exists for uid 501". Держим минимальный passwd в .aidevteam/.
+  PASSWD_FILE="$ROOT/.aidevteam/container-passwd"
+  printf 'root:x:0:0:root:/root:/bin/sh\n%s:x:%s:%s:%s:%s:/bin/sh\n' \
+    "$(id -un)" "$(id -u)" "$(id -g)" "$(id -un)" /tmp/aidevteam-home > "$PASSWD_FILE"
+  MOUNT_FLAGS+=(-v "$PASSWD_FILE:/etc/passwd:ro")
+
+  SSH_OPTS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts"
+  if ! ssh-add -l >/dev/null 2>&1 && [ -f "$HOME/.ssh/id_ed25519" ]; then
+    MOUNT_FLAGS+=(-v "$HOME/.ssh:/tmp/ssh:ro")
+    SSH_OPTS="-i /tmp/ssh/id_ed25519 -o IdentitiesOnly=yes $SSH_OPTS"
+  fi
+  ENV_FLAGS+=(-e "GIT_SSH_COMMAND=ssh $SSH_OPTS")
+
   if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
     ENV_FLAGS+=(-e DEEPSEEK_API_KEY)
   fi

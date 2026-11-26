@@ -11,3 +11,10 @@ def test_lock(repo):
     release_lock(repo)
     assert acquire_lock(repo) is True
     release_lock(repo)
+
+
+def test_pause_only_when_idle():
+    from aidevteam.watch import _pause_seconds
+
+    assert _pause_seconds(True, 300) == 0.0  # работа была — сразу следующий инкремент
+    assert _pause_seconds(False, 300) == 300.0

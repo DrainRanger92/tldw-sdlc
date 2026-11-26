@@ -34,6 +34,11 @@ def release_lock(root: Path) -> None:
     _lock_file(root).unlink(missing_ok=True)
 
 
+def _pause_seconds(worked: bool, interval: int) -> float:
+    """Пауза между итерациями: пока есть работа, циклы идут подряд."""
+    return 0.0 if worked else float(interval)
+
+
 def has_work(root: Path) -> bool:
     st = State.load(root)
     tasks = taskmod.load_tasks(root)
@@ -61,9 +66,12 @@ def cmd_watch(root: Path, args: list[str], ui: UI) -> int:
     try:
         while True:
             gitops.run_git(root, "fetch", "--quiet", check=False)
+            worked = False
             if has_work(root):
+                worked = True
                 code = run_cycle(root, cfg, ui)
                 if code == 2:
+                    worked = False
                     ui.plain("  ⚠ цикл упал — наблюдение продолжается, отчёт в .aidevteam/last-failure.md")
             else:
                 ui.plain(
@@ -71,7 +79,7 @@ def cmd_watch(root: Path, args: list[str], ui: UI) -> int:
                 )
             if "--once" in args:
                 return 0
-            time.sleep(cfg.watch_interval_sec)
+            time.sleep(_pause_seconds(worked, cfg.watch_interval_sec))
     except KeyboardInterrupt:
         ui.plain("\n  Наблюдение остановлено.")
         return 0
