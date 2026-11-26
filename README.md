@@ -67,6 +67,12 @@ CLI Docker Desktop лежит в `~/.docker/bin` — wrapper добавляет 
 `agents.dsh.reviewer_permission_mode = "danger-full-access"` — неизменность
 worktree всё равно проверит цикл.
 
+`git push` из контейнера идёт по SSH: wrapper прокидывает ssh-агент хоста
+(Docker Desktop отдаёт его через `/run/host-services/ssh-auth.sock`), а если агент
+пуст — монтирует `~/.ssh` только для чтения и использует `~/.ssh/id_ed25519`
+(`GIT_SSH_COMMAND`, `StrictHostKeyChecking=accept-new`). Пушить не нужно —
+`[git] push = "never"`, коммиты останутся локальными.
+
 ### Переключение на opencode
 
 ```toml
