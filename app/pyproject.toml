@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tldw"
-version = "0.2.0"
+version = "0.3.0"
 description = "TLDW — Telegram-бот: YouTube-видео в заметку для Obsidian"
 requires-python = ">=3.11,<4"
 dependencies = [
@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<10",
+    "pyyaml>=6,<7",
     "ruff>=0.6",
 ]
 
