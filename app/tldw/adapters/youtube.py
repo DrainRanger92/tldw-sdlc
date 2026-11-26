@@ -36,6 +36,8 @@ from youtube_transcript_api import (
 )
 from yt_dlp import YoutubeDL
 
+from tldw.errors import UserFacingError
+
 log = logging.getLogger(__name__)
 
 #: Языки субтитров в порядке предпочтения: сначала оригинал, затем английский.
@@ -49,8 +51,12 @@ WATCH_URL_TEMPLATE: Final = "https://www.youtube.com/watch?v={video_id}"
 #: Единственный формат субтитров, который разбирает fallback (его отдаёт YouTube).
 CAPTION_FORMAT: Final = "json3"
 
-MESSAGE_NOT_YOUTUBE: Final = "Ссылка не является ссылкой на видео YouTube."
-MESSAGE_NO_TRANSCRIPT: Final = "У этого видео нет доступных субтитров."
+MESSAGE_NOT_YOUTUBE: Final = (
+    "Это не ссылка на видео YouTube. Пришлите ссылку на ролик YouTube."
+)
+MESSAGE_NO_TRANSCRIPT: Final = (
+    "У этого видео нет субтитров, поэтому конспект сделать не получится."
+)
 MESSAGE_NETWORK: Final = "Не удалось получить данные с YouTube. Попробуйте позже."
 MESSAGE_VIDEO_UNAVAILABLE: Final = "Видео недоступно: возможно, оно удалено или закрыто."
 
@@ -73,16 +79,17 @@ _SHORT_PATH_RE: Final = re.compile(r"^/([^/]+)/?$")
 _WATCH_PATH: Final = "/watch"
 
 
-class YouTubeAdapterError(Exception):
+class YouTubeAdapterError(UserFacingError):
     """Базовая ошибка адаптера YouTube.
 
-    Обработчик различает подклассы, чтобы показать пользователю понятное
-    сообщение: «не YouTube», «нет субтитров», «сбой YouTube».
+    Наследуется от :class:`tldw.errors.UserFacingError`: сообщение каждого
+    подкласса написано для пользователя, а обработчик отличает такую ошибку
+    от неизвестного сбоя и не показывает стектрейс.
     """
 
 
 class NotYouTubeURLError(YouTubeAdapterError):
-    """Ссылка не является ссылкой на видео YouTube или id в ней некорректен."""
+    """Ссылка ведёт не на видео YouTube или id в ней некорректен."""
 
     def __init__(self, message: str = MESSAGE_NOT_YOUTUBE) -> None:
         super().__init__(message)

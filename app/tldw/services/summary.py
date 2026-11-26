@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
 from tldw.config import DEFAULT_MAX_VIDEO_DURATION_SECONDS, Settings
+from tldw.errors import UserFacingError
 from tldw.services.note import (
     Note,
     Quote,
@@ -74,11 +75,13 @@ MESSAGE_VIDEO_TOO_LONG: Final = (
 )
 
 
-class VideoTooLongError(Exception):
+class VideoTooLongError(UserFacingError):
     """Видео длиннее порога из конфига; заметка не создаётся.
 
-    Атрибуты с длительностями позволяют обработчику (T-008) собрать понятное
-    сообщение, не разбирая текст исключения.
+    Наследуется от :class:`tldw.errors.UserFacingError`: текст сообщения
+    («видео слишком длинное» с длительностью и лимитом) предназначен
+    пользователю. Атрибуты с длительностями позволяют собрать сообщение, не
+    разбирая текст исключения.
     """
 
     def __init__(self, duration_seconds: int, max_duration_seconds: int) -> None:

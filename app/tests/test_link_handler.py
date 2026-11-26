@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable
@@ -30,8 +31,17 @@ from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendDocument, SendMessage
 from aiogram.types import FSInputFile, Update
 
-from tldw.adapters.llm import SummaryQuote, SummaryTimelineEntry, VideoSummary
+from tldw.adapters.llm import (
+    MESSAGE_LLM_UNAVAILABLE,
+    LLMError,
+    SummaryQuote,
+    SummaryTimelineEntry,
+    VideoSummary,
+)
 from tldw.adapters.youtube import (
+    MESSAGE_NO_TRANSCRIPT,
+    MESSAGE_NOT_YOUTUBE,
+    NoTranscriptError,
     NotYouTubeURLError,
     Transcript,
     TranscriptSegment,
@@ -39,11 +49,11 @@ from tldw.adapters.youtube import (
     VideoMetadata,
 )
 from tldw.config import load_settings
+from tldw.errors import MESSAGE_UNEXPECTED, REDACTED
 from tldw.handlers import (
     MESSAGE_ACCEPTED,
     MESSAGE_ACCESS_DENIED,
     MESSAGE_DONE,
-    MESSAGE_FAILED,
     MESSAGE_NEED_LINK,
     MESSAGE_NO_FILE,
     MESSAGE_PROCESSING,
@@ -53,7 +63,13 @@ from tldw.handlers import (
     extract_first_url,
 )
 from tldw.services.note import Note, note_filename
-from tldw.services.summary import SummaryResult, SummaryService, TranscriptText
+from tldw.services.summary import (
+    MESSAGE_VIDEO_TOO_LONG,
+    SummaryResult,
+    SummaryService,
+    TranscriptText,
+    VideoTooLongError,
+)
 
 FAKE_BOT_TOKEN = "123456789:TEST-fake-token-not-a-secret"
 YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -396,8 +412,116 @@ def test_service_error_sends_generic_failure() -> None:
     requests = run_message(service, YOUTUBE_URL)
 
     assert request_types(requests) == [SendMessage, SendMessage, SendMessage]
-    assert requests[-1].text == MESSAGE_FAILED
+    assert requests[-1].text == MESSAGE_UNEXPECTED
     assert service.calls == [YOUTUBE_URL]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (NotYouTubeURLError(), MESSAGE_NOT_YOUTUBE),
+        (NoTranscriptError(), MESSAGE_NO_TRANSCRIPT),
+        (
+            VideoTooLongError(duration_seconds=7201, max_duration_seconds=7200),
+            MESSAGE_VIDEO_TOO_LONG.format(duration="02:00:01", limit="02:00:00"),
+        ),
+        (LLMError(), MESSAGE_LLM_UNAVAILABLE),
+    ],
+    ids=["not-youtube", "no-transcript", "too-long", "llm-unavailable"],
+)
+def test_known_error_gets_its_own_message_and_logs_reason(
+    error: Exception,
+    expected: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Пользователь видит свой текст, в логе есть причина, стектрейса нет."""
+    service = FakeSummaryService(error=error)
+
+    with caplog.at_level(logging.WARNING, logger="tldw.handlers.link"):
+        requests = run_message(service, YOUTUBE_URL)
+
+    assert request_types(requests) == [SendMessage, SendMessage, SendMessage]
+    answer = requests[-1].text
+    assert answer == expected
+    assert str(error) in answer
+    assert "Traceback" not in answer
+    assert "RuntimeError" not in answer
+
+    records = [record for record in caplog.records if record.name == "tldw.handlers.link"]
+    assert records, "сбой должен попасть в лог"
+    assert all(record.levelno == logging.WARNING for record in records), (
+        "известная ошибка логируется предупреждением, без ERROR"
+    )
+    assert type(error).__name__ in caplog.text
+    assert str(error) in caplog.text
+    assert YOUTUBE_URL not in caplog.text, "полная ссылка не должна попадать в лог"
+
+
+def test_unknown_error_gets_generic_message_and_error_log_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = FakeSummaryService(error=RuntimeError("boom"))
+
+    with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
+        requests = run_message(service, YOUTUBE_URL)
+
+    assert request_types(requests) == [SendMessage, SendMessage, SendMessage]
+    assert requests[-1].text == MESSAGE_UNEXPECTED
+    assert "Traceback" not in requests[-1].text
+    assert "boom" not in requests[-1].text
+
+    errors = [
+        record
+        for record in caplog.records
+        if record.name == "tldw.handlers.link" and record.levelno == logging.ERROR
+    ]
+    assert len(errors) == 1
+    logged = errors[0].getMessage()
+    assert "RuntimeError: boom" in logged
+    assert "Traceback (most recent call last)" in logged
+    assert YOUTUBE_URL not in logged
+
+
+def test_failure_log_redacts_tokens_and_api_keys(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    telegram_token = "123456789:AAHfakeToken0123456789abcdef"
+    # Bearer-токен без префикса ``sk-``: шаблон ключей OpenAI его не ловит.
+    bearer_token = "mysecretvalue12345"
+    env_key = "fake-llm-key-value"
+    leaked = (
+        f"https://api.telegram.org/bot{telegram_token}/sendMessage "
+        f"Authorization: Bearer {bearer_token} LLM_API_KEY={env_key}"
+    )
+    service = FakeSummaryService(error=RuntimeError(leaked))
+
+    with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
+        requests = run_message(service, YOUTUBE_URL)
+
+    assert requests[-1].text == MESSAGE_UNEXPECTED
+    for secret in (telegram_token, bearer_token, env_key):
+        assert secret not in caplog.text, "секрет не должен попадать в лог"
+    assert REDACTED in caplog.text
+    assert YOUTUBE_URL not in caplog.text
+
+
+@pytest.mark.parametrize("indent", ["", "    "], ids=["plain", "indented"])
+def test_failure_log_does_not_contain_full_transcript(
+    indent: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transcript = "\n".join(
+        f"{indent}сегмент-{index} " + "x" * 40 for index in range(120)
+    )
+    service = FakeSummaryService(error=RuntimeError(transcript))
+
+    with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
+        requests = run_message(service, YOUTUBE_URL)
+
+    assert requests[-1].text == MESSAGE_UNEXPECTED
+    assert transcript not in caplog.text
+    assert "\n    сегмент-" not in caplog.text, "строки с отступом не должны идти в лог"
+    assert "фрагмент обрезан" in caplog.text
 
 
 @pytest.mark.parametrize("with_path", [False, True], ids=["path-none", "file-missing"])

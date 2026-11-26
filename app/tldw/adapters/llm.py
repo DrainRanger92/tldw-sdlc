@@ -37,6 +37,7 @@ from tldw.config import (
     DEFAULT_LLM_TIMEOUT_SECONDS,
     Settings,
 )
+from tldw.errors import UserFacingError
 
 log = logging.getLogger(__name__)
 
@@ -79,11 +80,12 @@ _TIMECODE_RE: Final = re.compile(r"^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})$")
 JSON_MAPPING = Mapping[str, Any]
 
 
-class LLMError(Exception):
+class LLMError(UserFacingError):
     """Базовая ошибка LLM-адаптера.
 
-    Сообщение безопасно показывать пользователю; подробная причина сбоя
-    пишется в лог и не содержит ключа или транскрипта.
+    Наследуется от :class:`tldw.errors.UserFacingError`: сообщение безопасно
+    показывать пользователю, а подробная причина сбоя пишется в лог и не
+    содержит ключа или транскрипта.
     """
 
     def __init__(self, message: str = MESSAGE_LLM_UNAVAILABLE) -> None:

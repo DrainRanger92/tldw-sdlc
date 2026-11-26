@@ -20,8 +20,14 @@
 
 Текст без ссылки не запускает обработку: бот подсказывает нужный формат.
 Если ссылок несколько, обрабатывается первая — включая не-YouTube ссылку:
-её отвергает адаптер, а понятное сообщение об ошибке появится в T-008.
-Пока обработчик показывает общее сообщение о сбое и пишет причину в лог.
+её отвергает адаптер.
+
+Ошибки (T-008). Сбой обработки разбирает :func:`tldw.errors.log_failure`:
+известные типизированные ошибки (не YouTube, нет субтитров, слишком длинное
+видео, AI не ответил) дают пользователю своё понятное сообщение и запись
+причины в лог на уровне ``WARNING``; неизвестный сбой — общее сообщение и
+``ERROR`` со стектрейсом, очищенным от секретов и длинных фрагментов
+транскрипта. Ответ об ошибке не содержит стектрейса.
 
 Обработчик остаётся тонким (ADR-002): проверка доступа, разбор текста, ответы
 пользователю и передача ссылки в сервис — без бизнес-логики и без обращений
@@ -41,6 +47,7 @@ from aiogram import F, Router
 from aiogram.types import FSInputFile, Message
 
 from tldw.access import AccessPolicy
+from tldw.errors import log_failure
 from tldw.services.summary import SummaryResult
 
 log = logging.getLogger(__name__)
@@ -55,7 +62,6 @@ MESSAGE_NEED_LINK: Final = (
     "Пришлите ссылку на видео YouTube — например, https://youtu.be/XXXXXXXXXXX. "
     "Я сделаю из него заметку для Obsidian."
 )
-MESSAGE_FAILED: Final = "Не удалось обработать видео. Попробуйте позже."
 MESSAGE_NO_FILE: Final = "Заметка не сохранилась. Попробуйте ещё раз."
 
 #: Ссылка со схемой или ``www.`` — любой домен; без схемы распознаются только
@@ -158,13 +164,16 @@ class LinkHandler:
             await message.answer_document(document)
             await message.answer(MESSAGE_DONE)
             log.info("Заметка отправлена: %s", result.filename)
-        except Exception:  # noqa: BLE001 - обработчик не должен падать молча
-            # T-008 заменит общее сообщение разбором типизированных ошибок.
-            log.exception("Не удалось обработать ссылку %s", url)
+        except Exception as exc:  # noqa: BLE001 - обработчик не должен падать молча
+            # Типизированные ошибки получают своё сообщение, неизвестные —
+            # общее; секреты и транскрипт в лог не попадают (T-008). Логгер
+            # обработчика передаётся явно, чтобы источник записи был виден.
+            report = log_failure(exc, logger=log)
             try:
-                await message.answer(MESSAGE_FAILED)
-            except Exception:  # noqa: BLE001 - сбой Telegram не должен всплывать из задачи
-                log.exception("Не удалось отправить сообщение об ошибке")
+                await message.answer(report.user_message)
+            except Exception as reply_exc:  # noqa: BLE001 - сбой Telegram не должен всплывать
+                # Причину всё равно пишем в лог, но без токена бота из URL.
+                log_failure(reply_exc, logger=log)
 
 
 def _message_user_id(message: Message) -> int | None:
@@ -198,7 +207,6 @@ __all__ = [
     "MESSAGE_ACCESS_DENIED",
     "MESSAGE_ACCEPTED",
     "MESSAGE_DONE",
-    "MESSAGE_FAILED",
     "MESSAGE_NEED_LINK",
     "MESSAGE_NO_FILE",
     "MESSAGE_PROCESSING",

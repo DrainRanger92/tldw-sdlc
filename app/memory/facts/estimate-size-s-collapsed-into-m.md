@@ -99,6 +99,18 @@ output** (`cycle-06-spend.md`). Факт: **106 шагов (70 EXECUTE + 36 REVI
   `estimate-forecast-underestimates.md`, `estimate-m-stabilized.md` —
   обновлены после T-007.
 
-Связанные факты: `cycle-07-spend.md` (замер), `estimate-calibration-m.md`
-(пороги), `estimate-forecast-underestimates.md` (история промахов),
+## Цикл 8 (T-008): вторая S оказалась ещё дороже
+
+T-008 тоже была помечена **S**: «всего лишь тексты ошибок и логи». Факт —
+**178 шагов и 142,1 тыс. output**: больше, чем любая M, и в 1,7 раза больше
+T-007 по шагам. Поверхность снова широкая (6 продакшн-файлов, новый модуль,
+обработчик, адаптеры, сервис, 2 тестовых файла), но главную прибавку дал не
+объём, а раунд исправлений (55 шагов) и второй проход ревью (52). Правило
+S→M подтверждено дважды; для задач про приватность/безопасность логов
+добавлять ещё и FIX-резерв. См. `cycle-08-spend.md`,
+`estimate-misses-fix-round.md`.
+
+Связанные факты: `cycle-08-spend.md`, `cycle-07-spend.md` (замер),
+`estimate-calibration-m.md` (пороги),
+`estimate-forecast-underestimates.md` (история промахов),
 `review-debt-accumulates.md` (что осталось в коде).
