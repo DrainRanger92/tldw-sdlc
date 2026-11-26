@@ -1,33 +1,49 @@
 ---
 name: review-handoff
-description: Как готовить изменения TLDW к ревью и читать его результат — новые файлы через git add -N, сверка git status -uall с diffstat и ограничения read-only песочницы ревьюера (tmp_path, pytest -s).
+description: Как готовить изменения TLDW к ревью и читать его результат — git-обёртка для сломанного окружения, новые файлы через git add -N, сверка git status -uall с diffstat и ограничения read-only песочницы ревьюера (tmp_path, pytest -s).
 ---
 
 # Передача изменений на ревью
 
-Паттерн повторялся в циклах 1 и 2. В обоих ревьюер получал `git diff --stat`,
-в котором не было новых файлов: в цикле 1 — весь каркас `app/`, в цикле 2 —
-`note.py` и `test_note.py`. Ревьюер находил их сам, но доказательство в диффе
-было неполным. Второй повтор: ревьюер работает в read-only песочнице, где
-`tmp_path` падает ошибкой окружения, а не дефектом кода.
+Паттерн повторялся в циклах 1–3. В циклах 1 и 2 ревьюер получал
+`git diff --stat`, в котором не было новых файлов: в цикле 1 — весь каркас
+`app/`, в цикле 2 — `note.py` и `test_note.py`. В цикле 3 `git add -N`
+сработал: ревьюер увидел ровно 6 путей из `git status -uall`, совпавших с
+diffstat. Второй повтор — read-only песочница ревьюера: `tmp_path` падает
+ошибкой окружения, а не дефектом кода; в цикле 3 это дало 47 env-errors.
 
 ## Когда применять
 
 - Перед финальным ответом в любой задаче, где появились новые файлы.
 - При чтении отчёта ревьюера: понять, что он реально мог проверить.
 
+## Сначала — рабочая git-обёртка
+
+В DSH-сессиях git сломан двумя переменными окружения
+(`missing config key GIT_CONFIG_KEY_0` и `dubious ownership`). Не тратьте шаги
+на диагностику — используйте обёртку из `app/skills/git-in-sandbox/SKILL.md`:
+
+```bash
+git_ws() {
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_VALUE_0 -u GIT_CONFIG_KEY_0 \
+    git -c safe.directory=/workspace "$@"
+}
+```
+
 ## Подготовка рабочей копии
 
 ```bash
 cd /workspace
-git add -N app/                 # intent-to-add: новые файлы попадают в git diff
-git status --porcelain -uall    # полный список untracked
-git diff --stat <base>
-git diff <base> -- app/
+git_ws add -N app/                 # intent-to-add: новые файлы попадают в git diff
+git_ws status --porcelain -uall    # полный список untracked
+git_ws diff --stat <base>
+git_ws diff <base> -- app/
 ```
 
 - `git add -N` не коммитит содержимое, но делает новые файлы видимыми в
   `git diff`; без него diffstat может показать только правку `__init__.py`.
+- Если после `add -N` появился ещё один новый файл, повторите `add -N` для
+  него.
 - Сверьте каждый путь из `git status -uall` с диффом. Если файл есть в
   статусе, но не в диффе — ревьюер его не увидит, пока не прочитает вручную.
 - Не считайте `git diff --stat` полным описанием изменения, пока в рабочей
@@ -45,12 +61,17 @@ git diff <base> -- app/
 ```bash
 cd /workspace/app
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider -s
-.venv/bin/ruff check .
+.venv/bin/ruff check --no-cache .
 ```
 
-- Тесты без `tmp_path` пройдут; тесты с ним — ошибки окружения. В цикле 2 так
-  было 57 passed + 1 env-error, в цикле 1 — 12 passed + 46 env-errors.
-- `ruff check .` в read-only работает.
+- Тесты без `tmp_path` пройдут; тесты с ним — ошибки окружения. Динамика:
+  цикл 1 — 12 passed + 46 env-errors, цикл 2 — 57 passed + 1 env-error,
+  цикл 3 — 116 passed + 47 env-errors. Число ошибок зависит от доли тестов,
+  которым нужен временный каталог; это не регрессия.
+- В цикле 3 новый `test_youtube_adapter.py` не использует `tmp_path` и прошёл
+  отдельно: 47 passed. Если новый модуль не трогает файловую систему, его
+  можно прогнать целиком даже в read-only.
+- `ruff check .` в read-only работает (лучше с `--no-cache`).
 
 ## Разделяйте два факта
 
@@ -59,8 +80,14 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider -s
 два результата не смешивать. Если ревьюер пишет про ошибки `tmp_path`,
 проверьте, что они не попали в список дефектов.
 
+В цикле 3 ревью дало `APPROVE` с первой итерации, но 10 неблокирующих
+замечаний (P1 — таймаут основного источника, двойной `_extract_info`,
+приоритет ошибок). APPROVE не означает «долга нет»: см.
+`app/memory/facts/review-debt-accumulates.md`.
+
 ## Чек-лист перед ответом
 
+- [ ] Использована обёртка `git_ws` (или другой обход битого git-окружения).
 - [ ] `git add -N app/` выполнен, если появились новые файлы.
 - [ ] `git status --porcelain -uall` сверен с `git diff --stat`.
 - [ ] В дифф попал каждый новый файл (или он явно назван в ответе).

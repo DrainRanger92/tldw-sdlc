@@ -4,4 +4,44 @@
 подменять его фейковой реализацией без сети и токенов.
 """
 
-__all__: list[str] = []
+from .youtube import (
+    DEFAULT_LANGUAGES,
+    SOURCE_TRANSCRIPT_API,
+    SOURCE_YTDLP,
+    FallbackClient,
+    NoTranscriptError,
+    NotYouTubeURLError,
+    Transcript,
+    TranscriptApiClient,
+    TranscriptClient,
+    TranscriptSegment,
+    Video,
+    VideoMetadata,
+    VideoUnavailableError,
+    YouTubeAdapter,
+    YouTubeAdapterError,
+    YouTubeNetworkError,
+    YtDlpClient,
+    parse_video_id,
+)
+
+__all__ = [
+    "DEFAULT_LANGUAGES",
+    "FallbackClient",
+    "NoTranscriptError",
+    "NotYouTubeURLError",
+    "SOURCE_TRANSCRIPT_API",
+    "SOURCE_YTDLP",
+    "Transcript",
+    "TranscriptApiClient",
+    "TranscriptClient",
+    "TranscriptSegment",
+    "Video",
+    "VideoMetadata",
+    "VideoUnavailableError",
+    "YouTubeAdapter",
+    "YouTubeAdapterError",
+    "YouTubeNetworkError",
+    "YtDlpClient",
+    "parse_video_id",
+]

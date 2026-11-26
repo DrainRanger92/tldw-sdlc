@@ -33,6 +33,22 @@ PYTHONDONTWRITEBYTECODE=1`), прогнал остальные тесты и н�
 Паттерн вынесен в скил `app/skills/review-handoff/SKILL.md`: как готовить
 рабочую копию к ревью и как читать отчёт read-only ревьюера.
 
+## Повторение в цикле 3 (T-003)
+
+Ограничение подтвердилось в третий раз. Полный прогон у ревьюера:
+**116 passed + 47 errors**, все 47 — `FileNotFoundError: No usable temporary
+directory` в `test_config`/`test_cli`/`test_bootstrap`/`test_entrypoint`/
+`test_note`; ни один тест нового `test_youtube_adapter.py` не использует
+`tmp_path`. Отдельный прогон нового файла дал **47 passed**, `ruff check
+--no-cache .` — чисто, `ruff format --check` — 43 файла уже отформатированы.
+Ревьюер использовал `-s -p no:cacheprovider` и
+`PYTHONDONTWRITEBYTECODE=1`, env-ошибки в дефекты не записал; полный прогон
+в обычной песочнице дал **163 passed**.
+
+Число env-ошибок зависит от доли тестов с `tmp_path`: 46 в цикле 1, 1 в
+цикле 2, 47 в цикле 3. Это не регрессия, а состав набора.
+Итого 3 из 3 циклов: `APPROVE` ревьюера не доказывает зелёный `pytest`.
+
 ## Что делать
 
 - В промпте ревью явно писать: «тесты могут быть недоступны в read-only

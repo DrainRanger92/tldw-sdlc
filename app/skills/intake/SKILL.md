@@ -7,15 +7,21 @@ description: Как уточнять заявки пользователя в Э
 
 TLDW — Telegram-бот: ссылка на YouTube → транскрипт → конспект через LLM →
 `.md` для Obsidian (frontmatter, TL;DR, ключевые идеи, таймкоды, цитаты,
-«что проверить»); стек — Python 3.11+, aiogram 3. Сейчас готовы каркас
-`app/tldw` (слои handlers/services/adapters/storage, env-only конфиг с
-fail-fast, сборка без сети) и модель заметки с рендером Obsidian-Markdown в
-`services/note.py` (`Note`, `render_note`, `note_filename`; YAML формируется
-вручную, PyYAML — только в тестах); адаптеров YouTube/LLM и Telegram-сценария
-ещё нет. При уточнении опирайтесь на `specs/001-mvp/spec.md`, `plan.md` и
-`tasks.md` — они заполнены и являются источником истины; принятые решения:
-секреты только из env/`.env`, внешние вызовы только через адаптеры, данные —
-из `DATA_DIR`, шаблон заметки фиксирован (7 полей frontmatter + 5 секций).
+«что проверить»); стек — Python 3.11+, aiogram 3. Готовы каркас `app/tldw`
+(слои handlers/services/adapters/storage, env-only конфиг с fail-fast, сборка
+без сети), модель заметки с рендером в `services/note.py` (`Note`,
+`render_note`, `note_filename`; YAML вручную, PyYAML только в тестах) и
+YouTube-адаптер в `adapters/youtube.py`: `parse_video_id`,
+`YouTubeAdapter.fetch`, основной источник `youtube-transcript-api` с fallback
+`yt-dlp`, типизированные ошибки (`NotYouTubeURLError`, `NoTranscriptError`,
+`YouTubeNetworkError`, `VideoUnavailableError`), метаданные необязательны;
+163 офлайновых теста. Остались LLM-адаптер, сервис конспекта, Telegram-сценарий,
+allowlist, понятные ошибки и E2E (T-004–T-009 в `specs/001-mvp/tasks.md`);
+`spec.md` и `tasks.md` — источник истины, но `plan.md` пока называет текущим
+инкрементом T-002. При уточнении: секреты только из env/`.env`, внешние вызовы
+только через адаптеры, данные из `DATA_DIR`, шаблон заметки фиксирован (7 полей
+frontmatter + 5 секций); задачи вида «новый адаптер + fallback + разбор ошибок»
+в этом проекте де-факто L, их стоит дробить ещё на этапе заявки.
 
 (Эту секцию обновляет этап LEARN после каждого цикла: что появилось,
 какие решения приняты. Свежий срез бэклога и памяти приходит в сообщении —
