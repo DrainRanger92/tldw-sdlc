@@ -20,33 +20,33 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
-from aiogram import Bot, Dispatcher, Router
-from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendDocument, SendMessage
-from aiogram.types import FSInputFile, Update
-
-from tldw.adapters.llm import (
-    MESSAGE_LLM_UNAVAILABLE,
-    LLMError,
-    SummaryQuote,
-    SummaryTimelineEntry,
-    VideoSummary,
+from aiogram.types import FSInputFile
+from support import (
+    FAKE_BEARER_TOKEN,
+    FAKE_BOT_TOKEN,
+    FAKE_ENV_KEY,
+    VIDEO_URL,
+    FakeSummarizer,
+    FakeVideoSource,
+    make_harness,
+    make_summary,
+    make_video,
+    request_types,
+    run_message,
 )
+
+from tldw.adapters.llm import MESSAGE_LLM_UNAVAILABLE, LLMError
 from tldw.adapters.youtube import (
     MESSAGE_NO_TRANSCRIPT,
     MESSAGE_NOT_YOUTUBE,
     NoTranscriptError,
     NotYouTubeURLError,
-    Transcript,
-    TranscriptSegment,
-    Video,
-    VideoMetadata,
 )
 from tldw.config import load_settings
 from tldw.errors import MESSAGE_UNEXPECTED, REDACTED
@@ -57,8 +57,6 @@ from tldw.handlers import (
     MESSAGE_NEED_LINK,
     MESSAGE_NO_FILE,
     MESSAGE_PROCESSING,
-    LinkHandler,
-    SummaryProcessor,
     create_router,
     extract_first_url,
 )
@@ -70,119 +68,6 @@ from tldw.services.summary import (
     TranscriptText,
     VideoTooLongError,
 )
-
-FAKE_BOT_TOKEN = "123456789:TEST-fake-token-not-a-secret"
-YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-VIDEO_ID = "dQw4w9WgXcQ"
-
-
-class FakeSession(BaseSession):
-    """Сессия aiogram, которая записывает методы вместо вызова Telegram API."""
-
-    def __init__(self, on_request: Callable[[Any], None] | None = None) -> None:
-        super().__init__()
-        self.requests: list[Any] = []
-        self._on_request = on_request
-
-    async def make_request(self, bot: Bot, method: Any, timeout: int | None = None) -> Any:
-        if self._on_request is not None:
-            self._on_request(method)
-        self.requests.append(method)
-        return True
-
-    async def stream_content(
-        self,
-        url: str,
-        headers: dict[str, Any] | None = None,
-        timeout: int = 30,
-        chunk_size: int = 65536,
-        raise_for_status: bool = True,
-    ) -> AsyncGenerator[bytes, None]:
-        yield b""
-
-    async def close(self) -> None:
-        """Сетевых ресурсов у фейковой сессии нет."""
-
-
-@dataclass
-class Harness:
-    """Собранный фейковый бот: диспетчер, обработчик и журнал методов."""
-
-    bot: Bot
-    dispatcher: Dispatcher
-    handler: LinkHandler
-    session: FakeSession
-
-    async def send(self, text: str) -> None:
-        await self.dispatcher.feed_update(self.bot, make_update(text))
-
-    async def close(self) -> None:
-        await self.bot.session.close()
-
-
-def make_update(
-    text: str,
-    *,
-    update_id: int = 1,
-    user_id: int = 42,
-    with_sender: bool = True,
-) -> Update:
-    """Собрать апдейт с текстовым сообщением в приватном чате."""
-    message: dict[str, Any] = {
-        "message_id": 10,
-        "date": 0,
-        "chat": {"id": 42, "type": "private"},
-        "text": text,
-    }
-    if with_sender:
-        message["from"] = {"id": user_id, "is_bot": False, "first_name": "Тест"}
-    return Update.model_validate({"update_id": update_id, "message": message})
-
-
-def make_harness(
-    service: SummaryProcessor,
-    *,
-    allowed_user_ids: tuple[int, ...] = (),
-    on_request: Callable[[Any], None] | None = None,
-) -> Harness:
-    session = FakeSession(on_request)
-    bot = Bot(token=FAKE_BOT_TOKEN, session=session)
-    handler = LinkHandler(service, allowed_user_ids=allowed_user_ids)
-    router = Router(name="test-tldw")
-    handler.register(router)
-    dispatcher = Dispatcher()
-    dispatcher.include_router(router)
-    return Harness(bot=bot, dispatcher=dispatcher, handler=handler, session=session)
-
-
-def run_message(
-    service: SummaryProcessor,
-    text: str,
-    *,
-    allowed_user_ids: tuple[int, ...] = (),
-    user_id: int = 42,
-    with_sender: bool = True,
-    on_request: Callable[[Any], None] | None = None,
-) -> list[Any]:
-    """Пропустить сообщение через диспетчер и дождаться фоновой обработки."""
-
-    async def scenario() -> list[Any]:
-        harness = make_harness(
-            service,
-            allowed_user_ids=allowed_user_ids,
-            on_request=on_request,
-        )
-        try:
-            await harness.dispatcher.feed_update(
-                harness.bot,
-                make_update(text, user_id=user_id, with_sender=with_sender),
-            )
-            await harness.handler.wait_idle()
-        finally:
-            await harness.close()
-        return harness.session.requests
-
-    return asyncio.run(scenario())
 
 
 @dataclass
@@ -223,10 +108,6 @@ def make_result(tmp_path: Path, *, filename: str = "kak-uchitsya.md") -> Summary
     )
 
 
-def request_types(requests: list[Any]) -> list[type]:
-    return [type(request) for request in requests]
-
-
 def test_success_flow_sends_accepted_processing_document_and_done(tmp_path: Path) -> None:
     result = make_result(tmp_path)
     service = FakeSummaryService(result=result)
@@ -236,7 +117,7 @@ def test_success_flow_sends_accepted_processing_document_and_done(tmp_path: Path
         if isinstance(method, SendDocument):
             file_existed_at_send.append(Path(method.document.path).is_file())
 
-    requests = run_message(service, YOUTUBE_URL, on_request=on_request)
+    requests = run_message(service, VIDEO_URL, on_request=on_request)
 
     assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
     assert requests[0].text == MESSAGE_ACCEPTED
@@ -252,7 +133,7 @@ def test_success_flow_sends_accepted_processing_document_and_done(tmp_path: Path
 
     assert requests[3].text == MESSAGE_DONE
     assert "готово" in requests[3].text.lower()
-    assert service.calls == [YOUTUBE_URL]
+    assert service.calls == [VIDEO_URL]
 
 
 @pytest.mark.parametrize("text", ["привет", "посоветуй фильм про космос", "как дела?"])
@@ -270,9 +151,9 @@ def test_text_without_link_asks_for_youtube_link(text: str) -> None:
 def test_allowed_user_id_is_processed(tmp_path: Path) -> None:
     service = FakeSummaryService(result=make_result(tmp_path))
 
-    requests = run_message(service, YOUTUBE_URL, allowed_user_ids=(42, 1001), user_id=42)
+    requests = run_message(service, VIDEO_URL, allowed_user_ids=(42, 1001), user_id=42)
 
-    assert service.calls == [YOUTUBE_URL]
+    assert service.calls == [VIDEO_URL]
     assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
     assert requests[0].text == MESSAGE_ACCEPTED
 
@@ -280,7 +161,7 @@ def test_allowed_user_id_is_processed(tmp_path: Path) -> None:
 def test_stranger_gets_access_denied_and_no_processing() -> None:
     service = FakeSummaryService()
 
-    requests = run_message(service, YOUTUBE_URL, allowed_user_ids=(1001,), user_id=42)
+    requests = run_message(service, VIDEO_URL, allowed_user_ids=(1001,), user_id=42)
 
     assert request_types(requests) == [SendMessage]
     assert requests[0].text == MESSAGE_ACCESS_DENIED
@@ -307,7 +188,7 @@ def test_message_without_sender_is_denied_when_allowlist_is_set() -> None:
 
     requests = run_message(
         service,
-        YOUTUBE_URL,
+        VIDEO_URL,
         allowed_user_ids=(1001,),
         with_sender=False,
     )
@@ -320,9 +201,9 @@ def test_message_without_sender_is_denied_when_allowlist_is_set() -> None:
 def test_empty_allowlist_lets_a_stranger_through(tmp_path: Path) -> None:
     service = FakeSummaryService(result=make_result(tmp_path))
 
-    requests = run_message(service, YOUTUBE_URL, allowed_user_ids=(), user_id=777)
+    requests = run_message(service, VIDEO_URL, allowed_user_ids=(), user_id=777)
 
-    assert service.calls == [YOUTUBE_URL]
+    assert service.calls == [VIDEO_URL]
     assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
 
 
@@ -354,7 +235,7 @@ def test_processing_runs_in_a_worker_thread(tmp_path: Path) -> None:
         loop_thread.append(threading.get_ident())
         harness = make_harness(service)
         try:
-            await harness.send(YOUTUBE_URL)
+            await harness.send(VIDEO_URL)
             await harness.handler.wait_idle()
         finally:
             await harness.close()
@@ -381,7 +262,7 @@ def test_event_loop_is_not_blocked_while_video_is_processed(tmp_path: Path) -> N
         try:
             # Обработчик обязан вернуться сразу, не дожидаясь сервиса.
             started_at = time.monotonic()
-            await asyncio.wait_for(harness.send(YOUTUBE_URL), timeout=1.0)
+            await asyncio.wait_for(harness.send(VIDEO_URL), timeout=1.0)
             assert time.monotonic() - started_at < 1.0
             assert not release.is_set()
 
@@ -409,11 +290,11 @@ def test_event_loop_is_not_blocked_while_video_is_processed(tmp_path: Path) -> N
 def test_service_error_sends_generic_failure() -> None:
     service = FakeSummaryService(error=RuntimeError("boom"))
 
-    requests = run_message(service, YOUTUBE_URL)
+    requests = run_message(service, VIDEO_URL)
 
     assert request_types(requests) == [SendMessage, SendMessage, SendMessage]
     assert requests[-1].text == MESSAGE_UNEXPECTED
-    assert service.calls == [YOUTUBE_URL]
+    assert service.calls == [VIDEO_URL]
 
 
 @pytest.mark.parametrize(
@@ -438,7 +319,7 @@ def test_known_error_gets_its_own_message_and_logs_reason(
     service = FakeSummaryService(error=error)
 
     with caplog.at_level(logging.WARNING, logger="tldw.handlers.link"):
-        requests = run_message(service, YOUTUBE_URL)
+        requests = run_message(service, VIDEO_URL)
 
     assert request_types(requests) == [SendMessage, SendMessage, SendMessage]
     answer = requests[-1].text
@@ -454,7 +335,7 @@ def test_known_error_gets_its_own_message_and_logs_reason(
     )
     assert type(error).__name__ in caplog.text
     assert str(error) in caplog.text
-    assert YOUTUBE_URL not in caplog.text, "полная ссылка не должна попадать в лог"
+    assert VIDEO_URL not in caplog.text, "полная ссылка не должна попадать в лог"
 
 
 def test_unknown_error_gets_generic_message_and_error_log_with_traceback(
@@ -463,7 +344,7 @@ def test_unknown_error_gets_generic_message_and_error_log_with_traceback(
     service = FakeSummaryService(error=RuntimeError("boom"))
 
     with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
-        requests = run_message(service, YOUTUBE_URL)
+        requests = run_message(service, VIDEO_URL)
 
     assert request_types(requests) == [SendMessage, SendMessage, SendMessage]
     assert requests[-1].text == MESSAGE_UNEXPECTED
@@ -479,30 +360,26 @@ def test_unknown_error_gets_generic_message_and_error_log_with_traceback(
     logged = errors[0].getMessage()
     assert "RuntimeError: boom" in logged
     assert "Traceback (most recent call last)" in logged
-    assert YOUTUBE_URL not in logged
+    assert VIDEO_URL not in logged
 
 
 def test_failure_log_redacts_tokens_and_api_keys(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    telegram_token = "123456789:AAHfakeToken0123456789abcdef"
-    # Bearer-токен без префикса ``sk-``: шаблон ключей OpenAI его не ловит.
-    bearer_token = "mysecretvalue12345"
-    env_key = "fake-llm-key-value"
     leaked = (
-        f"https://api.telegram.org/bot{telegram_token}/sendMessage "
-        f"Authorization: Bearer {bearer_token} LLM_API_KEY={env_key}"
+        f"https://api.telegram.org/bot{FAKE_BOT_TOKEN}/sendMessage "
+        f"Authorization: Bearer {FAKE_BEARER_TOKEN} LLM_API_KEY={FAKE_ENV_KEY}"
     )
     service = FakeSummaryService(error=RuntimeError(leaked))
 
     with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
-        requests = run_message(service, YOUTUBE_URL)
+        requests = run_message(service, VIDEO_URL)
 
     assert requests[-1].text == MESSAGE_UNEXPECTED
-    for secret in (telegram_token, bearer_token, env_key):
+    for secret in (FAKE_BOT_TOKEN, FAKE_BEARER_TOKEN, FAKE_ENV_KEY):
         assert secret not in caplog.text, "секрет не должен попадать в лог"
     assert REDACTED in caplog.text
-    assert YOUTUBE_URL not in caplog.text
+    assert VIDEO_URL not in caplog.text
 
 
 @pytest.mark.parametrize("indent", ["", "    "], ids=["plain", "indented"])
@@ -516,7 +393,7 @@ def test_failure_log_does_not_contain_full_transcript(
     service = FakeSummaryService(error=RuntimeError(transcript))
 
     with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
-        requests = run_message(service, YOUTUBE_URL)
+        requests = run_message(service, VIDEO_URL)
 
     assert requests[-1].text == MESSAGE_UNEXPECTED
     assert transcript not in caplog.text
@@ -536,7 +413,7 @@ def test_missing_saved_file_is_reported(with_path: bool, tmp_path: Path) -> None
         )
     )
 
-    requests = run_message(service, YOUTUBE_URL)
+    requests = run_message(service, VIDEO_URL)
 
     assert request_types(requests) == [SendMessage, SendMessage, SendMessage]
     assert requests[-1].text == MESSAGE_NO_FILE
@@ -571,57 +448,12 @@ def test_extract_first_url(text: str | None, expected: str | None) -> None:
     assert extract_first_url(text) == expected
 
 
-def make_video() -> Video:
-    return Video(
-        url=YOUTUBE_URL,
-        metadata=VideoMetadata(
-            video_id=VIDEO_ID,
-            title="Как учиться",
-            channel="Канал автора",
-            duration_seconds=600,
-        ),
-        transcript=Transcript(
-            segments=(TranscriptSegment("Вступление", 0),),
-            language="ru",
-            source="test",
-        ),
-    )
-
-
-def make_summary() -> VideoSummary:
-    return VideoSummary(
-        tldr=("Первое предложение.", "Второе предложение.", "Третье предложение."),
-        key_ideas=tuple(f"Идея номер {index}" for index in range(1, 6)),
-        timeline=(SummaryTimelineEntry("00:00", "Вступление"),),
-        quotes=(
-            SummaryQuote("Первая цитата.", "00:01"),
-            SummaryQuote("Вторая цитата.", "00:02"),
-        ),
-        follow_ups=("Проверить пример из видео.",),
-    )
-
-
-@dataclass
-class FakeVideoSource:
-    video: Video
-
-    def fetch(self, url: str) -> Video:
-        return self.video
-
-
-@dataclass
-class FakeSummarizer:
-    summary: VideoSummary
-
-    def summarize(self, transcript: str, *, title: str = "", channel: str = "") -> VideoSummary:
-        return self.summary
-
-
 def test_note_is_saved_in_data_dir_before_sending(fake_env: dict[str, str]) -> None:
     settings = load_settings(fake_env)
+    video = make_video()
     service = SummaryService(
-        FakeVideoSource(make_video()),
-        FakeSummarizer(make_summary()),
+        FakeVideoSource(video=video),
+        FakeSummarizer(summary=make_summary()),
         data_dir=settings.data_dir,
     )
     file_existed_at_send: list[bool] = []
@@ -630,9 +462,9 @@ def test_note_is_saved_in_data_dir_before_sending(fake_env: dict[str, str]) -> N
         if isinstance(method, SendDocument):
             file_existed_at_send.append(Path(method.document.path).is_file())
 
-    requests = run_message(service, YOUTUBE_URL, on_request=on_request)
+    requests = run_message(service, VIDEO_URL, on_request=on_request)
 
-    expected_path = settings.data_dir / note_filename(Note(title="Как учиться"))
+    expected_path = settings.data_dir / note_filename(Note(title=video.metadata.title))
     assert expected_path.is_file()
     assert expected_path.parent == settings.data_dir
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from support import FAKE_API_KEY, FAKE_BEARER_TOKEN, FAKE_BOT_TOKEN, FAKE_ENV_KEY
 
 from tldw.adapters.llm import (
     MESSAGE_LLM_BAD_RESPONSE,
@@ -47,13 +48,6 @@ from tldw.errors import (
 )
 from tldw.services.summary import MESSAGE_VIDEO_TOO_LONG, VideoTooLongError
 
-#: Фиктивные секреты: похожи на настоящие, но не являются ими.
-FAKE_TELEGRAM_TOKEN = "123456789:AAHfakeToken0123456789abcdef"
-FAKE_API_KEY = "sk-fake-key-0123456789"
-FAKE_ENV_KEY = "fake-llm-key-value"
-#: Bearer-токен без префикса ``sk-``: шаблон ключей OpenAI его не ловит,
-#: поэтому проверяется именно очистка заголовка ``Authorization``.
-FAKE_BEARER_TOKEN = "mysecretvalue12345"
 #: Длинный «транскрипт», который не должен целиком попасть в лог.
 FAKE_TRANSCRIPT = " ".join(f"сегмент-{index}" for index in range(300))
 
@@ -171,7 +165,7 @@ def test_log_failure_writes_unknown_error_at_error_with_traceback(
 
 def test_log_redacts_telegram_token_api_keys_and_bearer() -> None:
     leaked = (
-        f"POST https://api.telegram.org/bot{FAKE_TELEGRAM_TOKEN}/sendMessage "
+        f"POST https://api.telegram.org/bot{FAKE_BOT_TOKEN}/sendMessage "
         f"Authorization: Bearer {FAKE_BEARER_TOKEN} LLM_API_KEY={FAKE_ENV_KEY} "
         f"openai key {FAKE_API_KEY} "
         "proxy http://user:supersecret@proxy.local"
@@ -179,7 +173,7 @@ def test_log_redacts_telegram_token_api_keys_and_bearer() -> None:
     report = describe_error(raised(RuntimeError(leaked)))
 
     for text in (report.reason, report.traceback_text or ""):
-        for secret in (FAKE_TELEGRAM_TOKEN, FAKE_BEARER_TOKEN, FAKE_ENV_KEY, FAKE_API_KEY):
+        for secret in (FAKE_BOT_TOKEN, FAKE_BEARER_TOKEN, FAKE_ENV_KEY, FAKE_API_KEY):
             assert secret not in text
         assert "supersecret" not in text
         assert REDACTED in text
