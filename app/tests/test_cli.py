@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,35 @@ from support import empty_env_file
 
 from tldw.bootstrap import Application
 from tldw.cli import EXIT_CONFIG_ERROR, EXIT_FAILURE, EXIT_OK, main
+
+
+class _RecordCollector(logging.Handler):
+    """Собирает записи логгера ``tldw.cli``.
+
+    ``main`` вызывает ``configure_logging`` с ``force=True``: он пересоздаёт
+    обработчики root и уносит обработчик ``caplog``, поэтому уровень записи о
+    сбое закрытия проверяется собственным обработчиком на именованном логгере,
+    который ``force=True`` не трогает.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def _cli_records() -> Iterator[list[logging.LogRecord]]:
+    """Записи ``tldw.cli`` во время вызова ``main`` (уровень и текст)."""
+    collector = _RecordCollector()
+    logger = logging.getLogger("tldw.cli")
+    logger.addHandler(collector)
+    try:
+        yield collector.records
+    finally:
+        logger.removeHandler(collector)
 
 
 def test_check_config_builds_application_with_fake_env(
@@ -211,7 +243,9 @@ def test_close_failure_on_run_path_does_not_escape_main(
 
     ``run_polling(close_bot_session=True)`` уже закрыл сессию, а ``asyncio.run``
     даёт новый loop — повторное закрытие может упасть. Раньше исключение
-    вылетало из ``main()`` вместо кода возврата (REVIEW-2 T-016).
+    вылетало из ``main()`` вместо кода возврата (REVIEW-2 T-016). Проверяется
+    обе стороны: исключение не выходит из ``main``, а причина пишется на
+    уровне ``WARNING`` (а не ``ERROR``/``CRITICAL``) и в stderr.
     """
 
     async def broken_close(self: Application) -> None:
@@ -220,12 +254,51 @@ def test_close_failure_on_run_path_does_not_escape_main(
     monkeypatch.setattr(Application, "run", lambda self: None)
     monkeypatch.setattr(Application, "close", broken_close)
 
-    exit_code = main(["--env-file", str(empty_env_file(tmp_path))], environ=fake_env)
+    with _cli_records() as records:
+        exit_code = main(["--env-file", str(empty_env_file(tmp_path))], environ=fake_env)
 
     captured = capsys.readouterr()
     assert exit_code == EXIT_OK
+    close_warnings = [
+        record
+        for record in records
+        if record.levelno == logging.WARNING
+        and "не удалось закрыть приложение" in record.getMessage()
+    ]
+    assert close_warnings, "сбой закрытия должен быть записан на WARNING"
+    assert all(record.levelno != logging.ERROR for record in records)
     assert "не удалось закрыть приложение" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_close_failure_does_not_replace_exit_failure(
+    fake_env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Сбой закрытия не подменяет ``EXIT_FAILURE`` от упавшего ``run()``."""
+
+    def broken_run(self: Application) -> None:
+        raise RuntimeError("polling failed")
+
+    async def broken_close(self: Application) -> None:
+        raise RuntimeError("session is closed")
+
+    monkeypatch.setattr(Application, "run", broken_run)
+    monkeypatch.setattr(Application, "close", broken_close)
+
+    with _cli_records() as records:
+        exit_code = main(["--env-file", str(empty_env_file(tmp_path))], environ=fake_env)
+
+    captured = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert "не удалось закрыть приложение" in captured.err
+    assert any(
+        record.levelno == logging.WARNING
+        and "не удалось закрыть приложение" in record.getMessage()
+        for record in records
+    )
 
 
 def test_check_config_reports_close_failure_without_secret(
@@ -241,13 +314,19 @@ def test_check_config_reports_close_failure_without_secret(
 
     monkeypatch.setattr(Application, "close", broken_close)
 
-    exit_code = main(
-        ["--check-config", "--env-file", str(empty_env_file(tmp_path))],
-        environ=fake_env,
-    )
+    with _cli_records() as records:
+        exit_code = main(
+            ["--check-config", "--env-file", str(empty_env_file(tmp_path))],
+            environ=fake_env,
+        )
 
     captured = capsys.readouterr()
     assert exit_code == EXIT_FAILURE
+    assert any(
+        record.levelno == logging.WARNING
+        and "не удалось закрыть приложение" in record.getMessage()
+        for record in records
+    )
     assert "Не удалось корректно остановить TLDW" in captured.err
     assert "Traceback" not in captured.err
     assert fake_env["TELEGRAM_BOT_TOKEN"] not in captured.err, "токен не должен утекать"

@@ -95,12 +95,16 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # суффиксом (``SECRET_KEY``, ``AWS_SECRET_ACCESS_KEY``, ``PASSWORD_HASH``,
     # ``ACCESS_TOKEN_HASH``) — без него сужение шаблона открыло регресс
     # (REVIEW-2 T-016). Регистр не важен, иначе ``llm_api_key=…``/
-    # ``db_password=…`` оставались в логе. Единственное исключение — счётчики
-    # ``*_TOKENS``: ``TOKEN(?!S)`` не совпадает с ``max_tokens``/
-    # ``MAX_OUTPUT_TOKENS``, потому что это лимит ответа, а не секрет (P3 T-008).
+    # ``db_password=…`` оставались в логе. Исключения — не-секреты, которые
+    # начинаются с ключевого слова: счётчики ``*_TOKENS`` (``TOKEN(?!S)``) и
+    # токенизатор ``tokenizer``/``TOKENIZERS_PARALLELISM`` (``IZER``):
+    # ``max_tokens``/``MAX_OUTPUT_TOKENS`` — лимит ответа, а не секрет (P3
+    # T-008). Токенизатор открылся уже после хвоста имени из FIX-2: до него
+    # имя должно было заканчиваться ключевым словом, поэтому ``tokenizer=…``
+    # не скрывался; проверено T-019.
     (
         re.compile(
-            r"\b((?:[A-Za-z_][A-Za-z0-9_]*?)?(?:TOKEN(?!S)|API_?KEY|SECRET|PASSWORD|"
+            r"\b((?:[A-Za-z_][A-Za-z0-9_]*?)?(?:TOKEN(?!S|IZER)|API_?KEY|SECRET|PASSWORD|"
             r"AUTHORIZATION)[A-Za-z0-9_]*)\s*[=:]\s*(?:(?:bearer|basic|token)\s+)?\S+",
             re.IGNORECASE,
         ),

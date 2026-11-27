@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Iterator
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 from support import FAKE_API_KEY, FAKE_BEARER_TOKEN, FAKE_BOT_TOKEN, FAKE_ENV_KEY, empty_env_file
@@ -37,6 +39,18 @@ def _restore_logging() -> Iterator[None]:
     root.filters[:] = filters
     root.setLevel(level)
     root.disabled = disabled
+
+
+def test_restore_logging_fixture_is_annotated_as_iterator() -> None:
+    """Фикстура — генератор, поэтому её возврат ``Iterator[None]`` (REVIEW-2).
+
+    Аннотация ``-> None`` у генераторной фикстуры вводила в заблуждение:
+    pytest ждёт итератор, а не значение. Проверка держит подсказку типа.
+    """
+    fixture_function = getattr(_restore_logging, "__wrapped__", _restore_logging)
+
+    assert inspect.isgeneratorfunction(fixture_function)
+    assert get_type_hints(fixture_function)["return"] == Iterator[None]
 
 
 def test_configure_logging_installs_the_central_filter() -> None:

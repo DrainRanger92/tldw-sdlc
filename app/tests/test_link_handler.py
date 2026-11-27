@@ -997,6 +997,64 @@ def test_repeated_link_is_deduplicated_and_llm_called_once(tmp_path: Path) -> No
     assert texts.count(MESSAGE_DONE) == 1
 
 
+@pytest.mark.parametrize(
+    ("first_url", "second_url"),
+    [
+        (VIDEO_URL, "https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=private-user-id"),
+        ("https://example.com/lecture/1", "https://example.com/lecture/1"),
+    ],
+    ids=["same-video-id-different-query", "same-url-without-video-id"],
+)
+def test_deduplication_key_uses_video_id_or_url(
+    tmp_path: Path,
+    first_url: str,
+    second_url: str,
+) -> None:
+    """Ключ дедупликации — чат + ``video_id`` (или URL), а не сырой текст ссылки.
+
+    Разные query-параметры YouTube дают один ``video_id``, поэтому это та же
+    работа; для ссылки без ``video_id`` ключом остаётся URL. Оба случая не
+    должны запускать LLM второй раз (REVIEW-2 T-016, критерий T-019).
+    """
+    started = threading.Event()
+    release = threading.Event()
+    service = FakeSummaryService(
+        result=make_result(tmp_path),
+        started=started,
+        release=release,
+    )
+    captured: list[str] = []
+
+    async def scenario() -> None:
+        harness = make_harness(service)
+        try:
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(first_url, update_id=1),
+            )
+            assert await asyncio.to_thread(started.wait, 5), "обработка не стартовала"
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(second_url, update_id=2),
+            )
+            release.set()
+            await harness.handler.wait_idle()
+            captured.extend(
+                request.text
+                for request in harness.session.requests
+                if hasattr(request, "text")
+            )
+        finally:
+            release.set()
+            await harness.handler.wait_idle()
+            await harness.close()
+
+    asyncio.run(scenario())
+
+    assert service.calls == [first_url], "та же работа не должна вызывать LLM дважды"
+    assert MESSAGE_ALREADY_PROCESSING in captured
+
+
 def test_same_link_in_another_chat_is_not_deduplicated(tmp_path: Path) -> None:
     """Та же ссылка в другом чате — другая доставка, а не дубль (REVIEW-2 T-016).
 

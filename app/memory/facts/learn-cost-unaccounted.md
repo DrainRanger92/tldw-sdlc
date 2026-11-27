@@ -212,8 +212,27 @@ size-forecast, audit-task, review-handoff, fix-round, git-in-sandbox,
 cycle-accounting, offline-tests, shared-helpers, adapter-boundary),
 **~10 существующих фактов** и индекс.
 
+Ретроспектива цикла 17 идёт после **222 шагов** (ANALYZE 61 + EXECUTE 101
++ REVIEW 60). По замеру до закрытия сессии: **≥ 189 шагов, ≥ 98,7 тыс.
+output, ≥ 31,1 млн токенов, ≥ 10,7 мин** — это **≥ 85 % шагов и ≥ 62 %
+output** цикла, самый дорогой LEARN по доле после цикла 12. Обновлялось:
+**4 новых факта** (`cycle-17-spend`, `t019-review-issues`,
+`estimate-verification-task-budget`, `tldw-baseline-after-t019`),
+**1 ADR** (ADR-025), **1 новый скил** (`fix-verification`) и **11
+обновлённых скилов** (intake-контекст, cycle-accounting, size-forecast,
+audit-task, review-handoff, fix-round, log-sanitization, offline-tests,
+git-in-sandbox, shared-helpers, release-metadata), **~8 существующих
+фактов** и индекс.
+
+Урок: цикл проверки дешевле аудита, но LEARN у него не дешевле — число
+обновляемых артефактов зависит от числа уроков, а не от шагов задачи. При
+222 шагах цикла LEARN добавляет ещё ~190, то есть полный цикл ≈ 410 шагов
+и ≈ 258 тыс. output. Бюджет `задача + 100–200 шагов` остаётся; снижать
+можно только через канонические факты-темы вместо новых файлов на каждый
+нюанс.
+
 Вывод не меняется, но уточняется: **цена LEARN зависит от числа
-обновляемых артефактов и объёма памяти (86 фактов, 24 ADR, 13 скилов), а
+обновляемых артефактов и объёма памяти (91 факт, 25 ADR, 14 скилов), а
 не от размера задачи.** На гигантском цикле LEARN выглядит дешёвым по
 доле (19 %), но это те же 100 шагов; бюджет `задача + 100–200 шагов`
 остаётся. Единственный способ снизить — не плодить новые факты на каждую
@@ -222,6 +241,7 @@ cycle-accounting, offline-tests, shared-helpers, adapter-boundary),
 два новых класса (L-аудит и два раунда ревью).
 
 Связанные: `cycle-13-spend.md`, `cycle-14-spend.md`, `cycle-16-spend.md`,
+`cycle-17-spend.md`, `t019-review-issues.md`,
 `t013-debt-audit.md`,
 `t013-review-issues.md`, `t014-debt-audit.md`, `t014-review-issues.md`,
 `review-debt-accumulates.md`, `estimate-audit-task-cost.md`,

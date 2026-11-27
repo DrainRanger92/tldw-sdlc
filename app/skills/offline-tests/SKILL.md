@@ -33,7 +33,11 @@ README, минус переписанные кейсы обработчика); 
 симметрия голоса/текста в `test_voice_handler.py`). В T-016 — **22 нетто**
 в 14 файлах и один новый файл `test_logging_setup.py` (секреты-ловушки на
 путях сборки/остановки, сторонний логгер, многострочный стектрейс,
-`--check-config`). Всего в наборе **1144 теста** в 32 файлах.
+`--check-config`). В T-019 — **+7 нетто** в 5 существующих файлах (tokenizer,
+`MAX_TOKENS`, различимость известной ошибки, `EXIT_FAILURE` при сбое
+закрытия, ключ дедупликации, имя `log_denial`, аннотация фикстуры). Всего в
+наборе **1151 тест** в 31 файле (`tests/`: 29 модулей + `conftest.py` и
+`support.py`).
 
 ## Когда применять
 
@@ -400,11 +404,12 @@ cd app
 Тесты без файловых операций (как `test_youtube_adapter.py`,
 `test_llm_adapter.py`, `test_access.py`, `test_errors.py` и `test_readme.py`)
 не используют `tmp_path` и потому проходят даже в read-only песочнице
-ревьюера. После T-016 полный набор — **1144 теста в 32 файлах**; новый файл —
-`test_logging_setup.py` (+156), остальные 22 кейса добавлены в 13
-существующих файлов, включая файловые `test_storage_templates.py`/
-`test_summary_templates.py`, сценарный `test_voice_handler.py` (+349 в
-`test_link_handler.py`) и `test_errors.py` (+169). Файлы адаптеров (включая `test_speech_adapter.py` —
+ревьюера. После T-019 полный набор — **1151 тест в 31 файле**; 7 новых
+кейсов добавлены в 5 существующих файлов (`test_errors.py`, `test_cli.py`,
+`test_link_handler.py`, `test_access.py`, `test_logging_setup.py`), новых
+файлов нет. T-019 добавила и тест-ловушку `tokenizer`/`TOKENIZERS_PARALLELISM`
+в `test_errors.py`: слова, начинающиеся с `TOKEN`, проверяются в обе
+стороны, иначе правка хвоста шаблона снова закроет не-секрет. Файлы адаптеров (включая `test_speech_adapter.py` —
 80 кейсов, `test_llm_adapter.py` — 68, `test_youtube_adapter.py` — 92),
 `test_access.py`, `test_errors.py`, `test_readme.py`, `test_template.py`,
 `test_template_parser.py`, `test_template_handler.py` (30 сценариев FSM) и
@@ -430,7 +435,9 @@ env-errors из 1056 (75,5 %)**, `test_youtube_adapter.py` — 91 из 92, «к�
 дважды, зелёность принята по арифметике 1056 + 25, LEARN прогнал 1081;
 **в цикле 16 — 0 из 1144 в обоих проходах**: оба раза `ISSUES` с пометкой
 «гейт не подтверждён», дефекты воспроизведены `python -c` в памяти,
-`ruff` прошёл дважды, LEARN перепроверил 1144 collected/passed.
+`ruff` прошёл дважды, LEARN перепроверил 1144 collected/passed; **в цикле
+17 — 50 из 1151**: `test_errors.py` прошёл целиком в read-only, полный
+набор не собрался из-за `tempfile`, LEARN перепроверил 1151 passed.
 Поэтому сценарные кейсы, которым
 нужен `tmp_path`, оставляйте гейту VERIFY, а в read-only проверяйте чистые
 функции и не-файловые ветки.
@@ -469,6 +476,10 @@ env-errors из 1056 (75,5 %)**, `test_youtube_adapter.py` — 91 из 92, «к�
   заголовки-ловушки, DEBUG/WARNING, сквозной рендер, 1081 тест.
 - `app/memory/facts/cycle-16-spend.md` — 22 новых кейса, файл
   `test_logging_setup.py`, 1144 теста; оба ревью без pytest.
+- `app/memory/facts/cycle-17-spend.md` — +7 кейсов в 5 файлах, 1151 тест;
+  `test_errors.py` прошёл в read-only (50 passed).
+- `app/memory/facts/t019-review-issues.md` — дубль теста дедупликации и
+  тест-ловушка `tokenizer`, которые нашло ревью T-019.
 - `app/skills/log-sanitization/SKILL.md` — тесты-ловушки редактора
   секретов в обе стороны.
 - `app/memory/facts/reviewer-readonly-tests.md` — почему в цикле 15

@@ -169,6 +169,20 @@ def test_denial_log_limiter_writes_only_the_first_warning(
     assert levels.count(logging.DEBUG) == 2, "повторы пишутся на DEBUG"
 
 
+def test_denial_log_limiter_does_not_shadow_module_log() -> None:
+    """Метод назван ``log_denial`` и не затеняет модульный ``log`` (REVIEW-2).
+
+    До FIX-2 метод назывался ``log``: выполнение он не путал, но чтение
+    ``limiter.log(...)`` рядом с модульным
+    ``log = logging.getLogger(__name__)`` выглядело как запись в чужой лог.
+    """
+    from tldw import access
+
+    assert isinstance(access.log, logging.Logger)
+    assert hasattr(DenialLogLimiter, "log_denial")
+    assert not hasattr(DenialLogLimiter, "log"), "метод не должен затенять log"
+
+
 def test_denial_log_limiter_does_not_grow_without_bound(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

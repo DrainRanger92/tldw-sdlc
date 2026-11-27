@@ -316,14 +316,34 @@ def test_max_tokens_is_not_mistaken_for_a_secret() -> None:
     """Лимит ответа LLM — не секрет: редактор не должен скрывать 4096.
 
     ``TOKEN(?!S)`` держит исключение для счётчиков ``*_TOKENS`` даже после
-    того, как у шаблона появился хвост имени (REVIEW-2 T-016).
+    того, как у шаблона появился хвост имени (REVIEW-2 T-016). ``MAX_TOKENS``
+    из критерия T-019 проверяется наравне с нижним регистром.
     """
     text = sanitize_log_text(
-        "max_tokens=4096, MAX_OUTPUT_TOKENS=4096, tokens=4096, input_tokens=17"
+        "max_tokens=4096, MAX_TOKENS=4096, MAX_OUTPUT_TOKENS=4096, "
+        "tokens=4096, input_tokens=17"
     )
 
     for limit in ("4096", "17"):
         assert limit in text
+    assert REDACTED not in text
+
+
+def test_tokenizer_names_are_not_mistaken_for_a_secret() -> None:
+    """Токенизатор — не секрет: хвост имени из FIX-2 не должен его скрывать.
+
+    ``TOKEN(?!S)`` сам по себе не спасал: ``tokenizer`` и
+    ``TOKENIZERS_PARALLELISM`` начинаются с ``TOKEN``, а хвост
+    ``[A-Za-z0-9_]*`` из FIX-2 доводил совпадение до ``=``. До FIX-2 имя
+    обязано было **заканчиваться** ключевым словом, поэтому ложное
+    срабатывание нашла независимая проверка T-019.
+    """
+    text = sanitize_log_text(
+        "tokenizer=cl100k_base, TOKENIZERS_PARALLELISM=false, Tokenizer: GPT2"
+    )
+
+    for value in ("cl100k_base", "false", "GPT2"):
+        assert value in text
     assert REDACTED not in text
 
 
@@ -475,3 +495,29 @@ def test_unknown_error_at_critical_threshold_is_not_lost(
     assert records
     assert records[0].levelno == logging.CRITICAL
     assert "RuntimeError: boom" in records[0].getMessage()
+
+
+def test_known_error_is_distinguishable_from_incident_at_error_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Компромисс ``_visible_level`` задокументирован и проверяем по тексту.
+
+    При ``LOG_LEVEL=ERROR`` известная ошибка тоже пишется как ``ERROR``, то
+    есть по уровню неотличима от инцидента (принятый компромисс, ADR-022).
+    Отличить её можно по тексту: «Сбой …» без стектрейса; у настоящего
+    инцидента — «Неизвестный сбой …» со стектрейсом. Тест фиксирует обе
+    стороны компромисса, а не только видимость записи.
+    """
+    with caplog.at_level(logging.ERROR, logger="tldw.errors"):
+        log_failure(NoTranscriptError())
+        log_failure(raised(RuntimeError("boom")))
+
+    records = [record for record in caplog.records if record.name == "tldw.errors"]
+    assert [record.levelno for record in records] == [logging.ERROR, logging.ERROR]
+    known = records[0].getMessage()
+    unknown = records[1].getMessage()
+    assert known.startswith("Сбой ")
+    assert "Неизвестный сбой" not in known
+    assert "Traceback" not in known
+    assert unknown.startswith("Неизвестный сбой")
+    assert "Traceback (most recent call last)" in unknown

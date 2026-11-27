@@ -67,6 +67,25 @@
 - В отчёте цикла писать «ревью 2/2, FIX-2 не проверен» — это меняет
   доверие к гейтам.
 
+## Слепое пятно закрыто в цикле 17
+
+T-019 проверила FIX-2 отдельной задачей (ADR-025): восстановила состав по
+журналу FIX-2-сессии (29 `edit` + 3 скриптовые правки в 12 файлах),
+прочитала каждую правку в текущем коде, воспроизвела ключевые сценарии и
+прогнала 11 мутаций. Найден **регресс `tokenizer`** — FIX-2 расширил хвост
+`[A-Za-z0-9_]*` и начал скрывать `tokenizer=cl100k_base`; исправление
+`TOKEN(?!S|IZER)` + тест-ловушка, набор 1144 → 1151.
+
+- **Правило подтверждено:** непроверенный FIX — это не формальность, а
+  реальный дефект; зелёные тесты автора его не ловили.
+- **Цена:** 222 шага (ANALYZE 61 + EXECUTE 101 + REVIEW 60), 159 тыс.
+  output; ревью — `APPROVE` с 4 неблокирующими пунктами. Дешевле, чем
+  третий раунд внутри T-016, но дороже аудита T-014.
+- **Остаток:** `specs/inbox/D-001` удалён, два пункта REVIEW-2 уточнены в
+  T-017, новых задач по заголовку черновика не заведено.
+- **Следующему циклу:** T-017 меняет те же обработчики, но стартует с
+  проверенного базиса; её размер — L, а не M (≥ 9 модулей).
+
 ## Как не попасть в это снова
 
 - Дробить аудит до ≤ 8 продакшн-модулей на задачу
@@ -79,7 +98,10 @@
   `handlers/link.py` одновременно — это сигнал двух раундов, а не
   одной итерации.
 
-Связанные: `cycle-16-spend.md`, `t016-review-issues.md`,
-`t016-debt-audit.md`, `estimate-audit-exceeds-budget.md`,
+Связанные: `cycle-16-spend.md`, `cycle-17-spend.md`,
+`t016-review-issues.md`, `t016-debt-audit.md`,
+`t019-fix2-verification.md`, `t019-review-issues.md`,
+`estimate-audit-exceeds-budget.md`, `estimate-verification-task-budget.md`,
 `review-fix-round-cost.md`, `reviewer-readonly-tests.md`,
-`app/skills/fix-round/SKILL.md`, `app/skills/review-handoff/SKILL.md`.
+`app/skills/fix-round/SKILL.md`, `app/skills/fix-verification/SKILL.md`,
+`app/skills/review-handoff/SKILL.md`.
