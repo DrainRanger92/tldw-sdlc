@@ -94,6 +94,10 @@ app/
   этапы 6 (голос) в бэклоге; `specs/001-mvp/plan.md` обновлён ANALYZE
   (MVP закрыт, следующий шаг — 002).
 
+Уточнение цикла 11: `pytest --collect-only` перед T-011 даёт **832** теста,
+а не 828 — счёт в отчёте T-010 был на 4 ниже. T-011 выполнена в цикле 11
+(`SpeechAdapter`, 893 теста), T-012 остаётся в бэклоге.
+
 Связанные: `cycle-10-spend.md`, `t001-t010-review-issues.md`,
 `review-debt-accumulates.md`, `adr-011-template-domain-storage.md`,
 `adr-012-dynamic-note-llm-template.md`, `adr-013-telegram-template-flow.md`.

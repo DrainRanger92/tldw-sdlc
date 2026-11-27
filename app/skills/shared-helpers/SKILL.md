@@ -195,6 +195,23 @@ T-008 свела `safe_user_message` и `sanitize_log_text` к общему `_co
   `grep -R "встроенный\|пользовательский"` — обе копии должны ссылаться на
   один источник или быть осознанно разными (текст для пользователя vs лог).
 
+## Цикл 11: `_parse_http_url` переиспользован, а `_parse_float` — нет
+
+T-011 вынесла разбор базового URL в общий `_parse_http_url`
+(`config.py`): `_parse_base_url` для LLM и `speech_base_url` теперь идут
+через одну функцию с проверкой схемы и `rstrip("/")`; `_optional_text` —
+одно место для пустых необязательных строк. Это правильное направление:
+второй адаптер не завёл вторую копию разбора URL.
+
+Но **валидация значения осталась разной:** `SpeechAdapter` проверяет
+`math.isfinite(timeout)`, а общий `_parse_float` — только `value < minimum`;
+поэтому `SPEECH_TIMEOUT_SECONDS=inf` проходит конфиг и падает plain
+`ValueError` в адаптере (P3 T-011), а `LLM_TIMEOUT_SECONDS=inf` — тот же
+дефект с цикла 1. Правило: если помощник общий, общими должны быть и
+границы значения (finite, положительность, host/port), иначе адаптер
+снова обрастает локальными проверками. См. `t011-review-issues.md` и
+`invalidurl-escapes-every-adapter.md`.
+
 ## См. также
 
 - `app/memory/facts/t002-review-issues.md`, `t003-review-issues.md`,

@@ -12,6 +12,8 @@ from tldw.config import (
     DEFAULT_DATA_DIR,
     DEFAULT_LLM_BASE_URL,
     DEFAULT_MAX_VIDEO_DURATION_SECONDS,
+    DEFAULT_SPEECH_BASE_URL,
+    DEFAULT_SPEECH_TIMEOUT_SECONDS,
     ConfigError,
     load_env_file,
     load_settings,
@@ -178,6 +180,58 @@ def test_invalid_llm_base_url_is_rejected(fake_env: dict[str, str]) -> None:
         load_settings(env)
 
 
+def test_speech_settings_are_optional_and_parsed(fake_env: dict[str, str]) -> None:
+    defaults = load_settings(fake_env)
+
+    assert defaults.speech_api_key == ""
+    assert defaults.speech_model == ""
+    assert defaults.speech_base_url == DEFAULT_SPEECH_BASE_URL
+    assert defaults.speech_timeout_seconds == DEFAULT_SPEECH_TIMEOUT_SECONDS
+
+    env = {
+        **fake_env,
+        "SPEECH_API_KEY": "test-speech-key-not-a-secret",
+        "SPEECH_MODEL": "test-whisper-model",
+        "SPEECH_BASE_URL": "https://speech.example.test/v1/",
+        "SPEECH_TIMEOUT_SECONDS": "12.5",
+    }
+
+    settings = load_settings(env)
+
+    assert settings.speech_api_key == "test-speech-key-not-a-secret"
+    assert settings.speech_model == "test-whisper-model"
+    assert settings.speech_base_url == "https://speech.example.test/v1"
+    assert settings.speech_timeout_seconds == 12.5
+
+
+@pytest.mark.parametrize(
+    ("name", "attribute"),
+    [("SPEECH_API_KEY", "speech_api_key"), ("SPEECH_MODEL", "speech_model")],
+)
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_speech_value_means_not_configured(
+    fake_env: dict[str, str], name: str, attribute: str, value: str
+) -> None:
+    settings = load_settings({**fake_env, name: value})
+
+    assert getattr(settings, attribute) == ""
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "soon"])
+def test_invalid_speech_timeout_is_rejected(fake_env: dict[str, str], value: str) -> None:
+    env = {**fake_env, "SPEECH_TIMEOUT_SECONDS": value}
+
+    with pytest.raises(ConfigError, match="SPEECH_TIMEOUT_SECONDS"):
+        load_settings(env)
+
+
+def test_invalid_speech_base_url_is_rejected(fake_env: dict[str, str]) -> None:
+    env = {**fake_env, "SPEECH_BASE_URL": "speech.example.test/v1"}
+
+    with pytest.raises(ConfigError, match="SPEECH_BASE_URL"):
+        load_settings(env)
+
+
 def test_invalid_log_level_is_rejected(fake_env: dict[str, str]) -> None:
     env = {**fake_env, "LOG_LEVEL": "verbose"}
 
@@ -192,13 +246,22 @@ def test_relative_data_dir_is_resolved_against_app_dir(fake_env: dict[str, str])
 
 
 def test_repr_hides_secrets(fake_env: dict[str, str]) -> None:
-    settings = load_settings(fake_env)
+    speech_key = "test-speech-key-not-a-secret"
+    settings = load_settings(
+        {
+            **fake_env,
+            "SPEECH_API_KEY": speech_key,
+            "SPEECH_MODEL": "test-whisper-model",
+        }
+    )
 
     text = repr(settings)
 
     assert fake_env["TELEGRAM_BOT_TOKEN"] not in text
     assert fake_env["LLM_API_KEY"] not in text
+    assert speech_key not in text
     assert "test-model" in text
+    assert "test-whisper-model" in text
 
 
 def test_read_env_file_parses_supported_syntax(tmp_path: Path) -> None:

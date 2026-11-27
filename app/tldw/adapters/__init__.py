@@ -1,4 +1,4 @@
-"""Адаптеры внешних систем: YouTube и LLM.
+"""Адаптеры внешних систем: YouTube, LLM и распознавание речи.
 
 Каждый внешний вызов изолирован здесь, чтобы сервисы и тесты могли
 подменять его фейковой реализацией без сети и токенов.
@@ -22,6 +22,16 @@ from .llm import (
     build_user_prompt,
     parse_summary,
     parse_template_patch,
+)
+from .speech import (
+    MAX_AUDIO_DURATION_SECONDS,
+    SpeechAdapter,
+    SpeechError,
+    SpeechNotConfiguredError,
+    SpeechProviderError,
+    SpeechResponseError,
+    SpeechTimeoutError,
+    SpeechTooLongError,
 )
 from .youtube import (
     DEFAULT_LANGUAGES,
@@ -52,10 +62,18 @@ __all__ = [
     "LLMProviderError",
     "LLMResponseError",
     "LLMTimeoutError",
+    "MAX_AUDIO_DURATION_SECONDS",
     "NoTranscriptError",
     "NotYouTubeURLError",
     "SOURCE_TRANSCRIPT_API",
     "SOURCE_YTDLP",
+    "SpeechAdapter",
+    "SpeechError",
+    "SpeechNotConfiguredError",
+    "SpeechProviderError",
+    "SpeechResponseError",
+    "SpeechTimeoutError",
+    "SpeechTooLongError",
     "SummaryQuote",
     "SummarySection",
     "SummaryTimelineEntry",

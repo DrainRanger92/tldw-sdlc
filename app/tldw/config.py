@@ -32,6 +32,17 @@ ENV_VIDEO_MAX_DURATION_SECONDS = "VIDEO_MAX_DURATION_SECONDS"
 ENV_DATA_DIR = "DATA_DIR"
 ENV_LOG_LEVEL = "LOG_LEVEL"
 
+# --- Распознавание речи (необязательный голосовой ввод, T-011) ---
+#: Базовый URL OpenAI-совместимого API распознавания речи по умолчанию.
+DEFAULT_SPEECH_BASE_URL = "https://api.openai.com/v1"
+#: Таймаут одного запроса распознавания речи по умолчанию, секунды.
+DEFAULT_SPEECH_TIMEOUT_SECONDS = 60.0
+
+ENV_SPEECH_API_KEY = "SPEECH_API_KEY"
+ENV_SPEECH_BASE_URL = "SPEECH_BASE_URL"
+ENV_SPEECH_MODEL = "SPEECH_MODEL"
+ENV_SPEECH_TIMEOUT_SECONDS = "SPEECH_TIMEOUT_SECONDS"
+
 #: Переменные, без которых приложение не запускается.
 REQUIRED_ENV_VARS: tuple[str, ...] = (
     ENV_TELEGRAM_BOT_TOKEN,
@@ -46,6 +57,10 @@ OPTIONAL_ENV_VARS: tuple[str, ...] = (
     ENV_VIDEO_MAX_DURATION_SECONDS,
     ENV_DATA_DIR,
     ENV_LOG_LEVEL,
+    ENV_SPEECH_API_KEY,
+    ENV_SPEECH_BASE_URL,
+    ENV_SPEECH_MODEL,
+    ENV_SPEECH_TIMEOUT_SECONDS,
 )
 #: Все переменные приложения; список сверяется с ``app/.env.example`` тестом.
 ALL_ENV_VARS: tuple[str, ...] = (*REQUIRED_ENV_VARS, *OPTIONAL_ENV_VARS)
@@ -80,6 +95,12 @@ class Settings:
     llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
     data_dir: Path = DEFAULT_DATA_DIR
     log_level: str = DEFAULT_LOG_LEVEL
+    #: Необязательная настройка голосового ввода: пустые ключ и модель значат
+    #: «распознавание речи не настроено», текстовый сценарий работает без них.
+    speech_api_key: str = field(default="", repr=False)
+    speech_model: str = ""
+    speech_base_url: str = DEFAULT_SPEECH_BASE_URL
+    speech_timeout_seconds: float = DEFAULT_SPEECH_TIMEOUT_SECONDS
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -125,6 +146,19 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         ),
         data_dir=_parse_data_dir(values[ENV_DATA_DIR]),
         log_level=_parse_log_level(values[ENV_LOG_LEVEL]),
+        speech_api_key=_optional_text(values, ENV_SPEECH_API_KEY),
+        speech_model=_optional_text(values, ENV_SPEECH_MODEL),
+        speech_base_url=_parse_http_url(
+            values[ENV_SPEECH_BASE_URL],
+            ENV_SPEECH_BASE_URL,
+            default=DEFAULT_SPEECH_BASE_URL,
+        ),
+        speech_timeout_seconds=_parse_float(
+            values[ENV_SPEECH_TIMEOUT_SECONDS],
+            ENV_SPEECH_TIMEOUT_SECONDS,
+            default=DEFAULT_SPEECH_TIMEOUT_SECONDS,
+            minimum=1.0,
+        ),
     )
 
 
@@ -183,6 +217,11 @@ def _required(values: Mapping[str, str | None], name: str) -> str:
     return value
 
 
+def _optional_text(values: Mapping[str, str | None], name: str) -> str:
+    """Необязательное значение строкой: пусто — значит «не настроено»."""
+    return values[name] or ""
+
+
 def _parse_allowed_user_ids(raw: str | None) -> tuple[int, ...]:
     if raw is None:
         return ()
@@ -232,10 +271,15 @@ def _parse_float(raw: str | None, name: str, *, default: float, minimum: float) 
 
 
 def _parse_base_url(raw: str | None) -> str:
+    return _parse_http_url(raw, ENV_LLM_BASE_URL, default=DEFAULT_LLM_BASE_URL)
+
+
+def _parse_http_url(raw: str | None, name: str, *, default: str) -> str:
+    """Разобрать необязательный базовый URL HTTP-API (LLM или распознавания)."""
     if raw is None:
-        return DEFAULT_LLM_BASE_URL
+        return default
     if not raw.startswith(("http://", "https://")):
-        raise ConfigError(f"{ENV_LLM_BASE_URL} должна начинаться с http:// или https://.")
+        raise ConfigError(f"{name} должна начинаться с http:// или https://.")
     return raw.rstrip("/")
 
 
