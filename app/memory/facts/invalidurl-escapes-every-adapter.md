@@ -52,12 +52,15 @@ httpx.TimeoutException ... except httpx.HTTPError ...`. `InvalidURL`
    в query; в лог — только тип исключения, без текста.
 
 Это повторяющийся паттерн (2 адаптера, 2 цикла), поэтому рецепт вынесен в
-скил `app/skills/adapter-boundary/SKILL.md`. Пока P1 T-004 не закрыт,
-следующий адаптер (например, голосовой T-012) получит ту же дыру, если не
-добавить `InvalidURL` в шаблон.
+скил `app/skills/adapter-boundary/SKILL.md`. **Цикл 12 подтвердил риск:**
+T-012 подключила голос, но `InvalidURL` в `SpeechAdapter` не закрыла (не
+входил в критерии) — обработчик проверяет `is_configured` до вызова, однако
+`_make_client()` остался вне `try`, а конфиг проверяет только схему URL.
+P2 T-011 перешёл в третий цикл. Пока P1 T-004 не закрыт, следующий адаптер
+получит ту же дыру, если не добавить `InvalidURL` в шаблон.
 
 Связанные: `t004-review-issues.md`, `t011-review-issues.md`,
-`t003-review-issues.md`, `review-debt-accumulates.md`,
+`t003-review-issues.md`, `cycle-12-spend.md`, `review-debt-accumulates.md`,
 `cycle-11-spend.md`, `adr-004-youtube-adapter-contract.md`,
 `adr-005-llm-adapter-contract.md`, `adr-015-speech-adapter.md`,
 `app/skills/adapter-boundary/SKILL.md`.

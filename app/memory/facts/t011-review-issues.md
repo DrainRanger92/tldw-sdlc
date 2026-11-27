@@ -89,6 +89,17 @@
   одиночный WARNING и общий `_parse_float`. Иначе голосовой сценарий
   унаследует все четыре P3.
 
+## Что стало в цикле 12
+
+T-012 закрыла три группы из шести: handoff (P2) не повторился — `git add -N`
+выполнен, 16 файлов в diffstat; `math.isfinite` добавлен в `_parse_float`
+(P3); порядок «`is_configured` до длительности» соблюдён, двойного WARNING
+больше нет (P3). **Остались:** P2 `httpx.InvalidURL` мимо `SpeechError`
+(обработчик проверяет `is_configured`, но `_make_client` вне `try`, а конфиг
+проверяет только схему URL) и P3 `media_type` (T-012 его из Telegram не
+передаёт, поэтому дефект теоретический). Долг: 83 → ≈87
+(`review-debt-accumulates.md`, `cycle-12-spend.md`).
+
 Связанные: `review-debt-accumulates.md`, `review-diff-untracked.md`,
 `reviewer-readonly-tests.md`, `cycle-11-spend.md`,
 `invalidurl-escapes-every-adapter.md`,

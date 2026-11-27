@@ -28,8 +28,8 @@ from typing import Any
 import yaml
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import EditMessageText, SendMessage
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from aiogram.methods import EditMessageText, GetFile, SendMessage
+from aiogram.types import File, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 
 from tldw.adapters.llm import (
     SummaryQuote,
@@ -41,7 +41,13 @@ from tldw.adapters.llm import (
 from tldw.adapters.youtube import Transcript, TranscriptSegment, Video, VideoMetadata
 from tldw.bootstrap import Application, build_application
 from tldw.config import Settings
-from tldw.handlers import LinkHandler, SummaryProcessor, TemplateHandler, TemplateParser
+from tldw.handlers import (
+    LinkHandler,
+    SpeechTranscriber,
+    SummaryProcessor,
+    TemplateHandler,
+    TemplateParser,
+)
 from tldw.handlers.template import TemplateAction
 from tldw.services.note import Note
 from tldw.services.summary import SummaryResult, SummaryService, TranscriptText
@@ -149,18 +155,72 @@ class FakeTemplateParser:
         return TemplatePatchDraft(sections=self.sections, tone=self.tone)
 
 
-class FakeSession(BaseSession):
-    """Сессия aiogram, которая записывает методы вместо вызова Telegram API."""
+class FakeSpeechTranscriber:
+    """Фейковая граница распознавания речи: запись вызовов, текст или ошибка.
 
-    def __init__(self, on_request: Callable[[Any], None] | None = None) -> None:
+    Структурно реализует ``tldw.handlers.SpeechTranscriber``: ``is_configured``
+    и синхронный ``transcribe``. ``thread_ids`` позволяет убедиться, что
+    распознавание уходит в рабочий поток; лимит длительности — общая константа
+    :data:`tldw.config.MAX_AUDIO_DURATION_SECONDS`, адаптеру её не передают.
+    """
+
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        error: Exception | None = None,
+        configured: bool = True,
+    ) -> None:
+        self.text = text
+        self.error = error
+        self.configured = configured
+        self.calls: list[tuple[bytes, float]] = []
+        self.thread_ids: list[int] = []
+
+    @property
+    def is_configured(self) -> bool:
+        """Настроена ли граница распознавания (в тестах — по флагу)."""
+        return self.configured
+
+    def transcribe(self, audio: bytes, *, duration_seconds: float) -> str:
+        """Записать вызов и вернуть заданный текст или поднять заданную ошибку."""
+        self.calls.append((audio, duration_seconds))
+        self.thread_ids.append(threading.get_ident())
+        if self.error is not None:
+            raise self.error
+        return self.text
+
+
+class FakeSession(BaseSession):
+    """Сессия aiogram, которая записывает методы вместо вызова Telegram API.
+
+    ``audio`` — содержимое «скачанного» голосового сообщения: ``get_file``
+    отвечает настоящим :class:`aiogram.types.File`, а ``stream_content`` отдаёт
+    эти байты, поэтому путь скачивания aiogram проверяется без сети.
+    """
+
+    def __init__(
+        self,
+        on_request: Callable[[Any], None] | None = None,
+        *,
+        audio: bytes = b"",
+    ) -> None:
         super().__init__()
         self.requests: list[Any] = []
+        self.audio = audio
         self._on_request = on_request
 
     async def make_request(self, bot: Bot, method: Any, timeout: int | None = None) -> Any:
         if self._on_request is not None:
             self._on_request(method)
         self.requests.append(method)
+        if isinstance(method, GetFile):
+            return File(
+                file_id=method.file_id,
+                file_unique_id=f"fake-unique-{method.file_id}",
+                file_size=len(self.audio),
+                file_path="voice/fake.oga",
+            )
         return True
 
     async def stream_content(
@@ -171,6 +231,9 @@ class FakeSession(BaseSession):
         chunk_size: int = 65536,
         raise_for_status: bool = True,
     ) -> AsyncGenerator[bytes, None]:
+        if self.audio:
+            yield self.audio
+            return
         yield b""
 
     async def close(self) -> None:
@@ -233,6 +296,36 @@ def make_callback_update(
     )
 
 
+def make_voice_update(
+    *,
+    duration: int = 10,
+    update_id: int = 1,
+    user_id: int = 42,
+    chat_id: int | None = None,
+    file_id: str = "fake-voice-file",
+    with_sender: bool = True,
+) -> Update:
+    """Собрать апдейт с голосовым сообщением известной длительности.
+
+    ``duration`` — то, что Telegram присылает в ``voice.duration``: по нему
+    обработчик отвергает аудио длиннее лимита **до** скачивания.
+    """
+    message: dict[str, Any] = {
+        "message_id": 11,
+        "date": 0,
+        "chat": {"id": user_id if chat_id is None else chat_id, "type": "private"},
+        "voice": {
+            "file_id": file_id,
+            "file_unique_id": f"fake-unique-{file_id}",
+            "duration": duration,
+            "mime_type": "audio/ogg",
+        },
+    }
+    if with_sender:
+        message["from"] = {"id": user_id, "is_bot": False, "first_name": "Тест"}
+    return Update.model_validate({"update_id": update_id, "message": message})
+
+
 @dataclass
 class Harness:
     """Собранный фейковый бот: диспетчер, обработчики и журнал методов."""
@@ -253,6 +346,13 @@ class Harness:
         await self.dispatcher.feed_update(
             self.bot,
             make_update(text, user_id=user_id, with_sender=with_sender),
+        )
+
+    async def send_voice(self, *, duration: int = 10, user_id: int = 42) -> None:
+        """Отправить голосовое сообщение заданной длительности."""
+        await self.dispatcher.feed_update(
+            self.bot,
+            make_voice_update(duration=duration, user_id=user_id),
         )
 
     async def send_callback(
@@ -406,6 +506,17 @@ class AppHarness:
             ),
         )
 
+    async def send_voice(self, *, duration: int = 10, user_id: int = 42) -> None:
+        """Отправить голосовое сообщение через настоящий диспетчер."""
+        await self.application.dispatcher.feed_update(
+            self.application.bot,
+            make_voice_update(
+                duration=duration,
+                update_id=self._next_update_id(),
+                user_id=user_id,
+            ),
+        )
+
     async def send_link(self, text: str, *, user_id: int = 42) -> None:
         """Отправить ссылку и дождаться фоновой обработки видео."""
         await self.send(text, user_id=user_id)
@@ -433,6 +544,8 @@ def build_app_harness(
     summary_service: SummaryProcessor | None = None,
     template_service: TemplateService | None = None,
     template_parser: TemplateParser | None = None,
+    speech_transcriber: SpeechTranscriber | None = None,
+    audio: bytes = b"",
     on_request: Callable[[Any], None] | None = None,
 ) -> AppHarness:
     """Собрать приложение из настроек и подменить его сессию Telegram.
@@ -441,6 +554,9 @@ def build_app_harness(
     :param template_service: сервис шаблонов; ``None`` — настоящий
         ``TemplateStore`` в ``settings.data_dir``.
     :param template_parser: фейковый разбор описания (граница LLM).
+    :param speech_transcriber: фейковая граница распознавания речи; ``None`` —
+        настоящий адаптер из ``SPEECH_*`` (без env он «не настроен»).
+    :param audio: байты, которые отдаст фейковая сессия при скачивании голосового.
     :param on_request: колбэк на каждый метод Telegram — позволяет проверить
         файл заметки в момент отправки.
     """
@@ -449,9 +565,10 @@ def build_app_harness(
         summary_service=summary_service,
         template_service=template_service,
         template_parser=template_parser,
+        speech_transcriber=speech_transcriber,
     )
     original_session = application.bot.session
-    session = FakeSession(on_request)
+    session = FakeSession(on_request, audio=audio)
     application.bot.session = session
     return AppHarness(
         application=application,
@@ -662,7 +779,8 @@ class TemplateStand:
 
     ``repository`` — фейковое хранилище в памяти; ``None`` означает файловый
     стенд, где сервис собран поверх настоящего ``TemplateStore``, а журнал
-    сохранений и сбросов ведёт само хранилище.
+    сохранений и сбросов ведёт само хранилище. ``speech`` — фейковая граница
+    распознавания речи; ``None`` — голосовой ввод не подключён.
     """
 
     harness: Harness
@@ -671,6 +789,7 @@ class TemplateStand:
     repository: FakeTemplateRepository | None
     source: FakeVideoSource
     summarizer: FakeSummarizer
+    speech: FakeSpeechTranscriber | None = None
 
     @property
     def requests(self) -> list[Any]:
@@ -701,6 +820,10 @@ class TemplateStand:
         """Отправить текстовое сообщение пользователя."""
         await self.harness.send(text, user_id=user_id)
 
+    async def send_voice(self, *, duration: int = 10, user_id: int = 42) -> None:
+        """Отправить голосовое сообщение пользователя."""
+        await self.harness.send_voice(duration=duration, user_id=user_id)
+
     async def click(self, action: str, *, user_id: int = 42) -> None:
         """Нажать inline-кнопку сценария с заданным действием."""
         await self.harness.send_callback(template_action(action), user_id=user_id)
@@ -715,6 +838,8 @@ def make_template_stand(
     allowed_user_ids: tuple[int, ...] = (),
     source: FakeVideoSource | None = None,
     summarizer: FakeSummarizer | None = None,
+    speech: FakeSpeechTranscriber | None = None,
+    audio: bytes = b"",
 ) -> TemplateStand:
     """Собрать стенд: сервис шаблонов, фейковый разбор и обработчики.
 
@@ -726,6 +851,8 @@ def make_template_stand(
     :param templates: готовый сервис шаблонов — например, поверх настоящего
         ``TemplateStore``; тогда ``repository`` не нужен и остаётся ``None``.
     :param user_template: заранее сохранённый шаблон пользователя 42.
+    :param speech: фейковая граница распознавания речи; ``None`` — без голоса.
+    :param audio: байты, которые фейковая сессия отдаст при скачивании голосового.
     """
     if templates is not None and repository is not None:
         raise ValueError("передайте либо templates, либо repository, не оба")
@@ -746,11 +873,17 @@ def make_template_stand(
     )
     source = source if source is not None else FakeVideoSource()
     summarizer = summarizer if summarizer is not None else FakeSummarizer()
-    handler = TemplateHandler(templates, parser, allowed_user_ids=allowed_user_ids)
+    handler = TemplateHandler(
+        templates,
+        parser,
+        speech=speech,
+        allowed_user_ids=allowed_user_ids,
+    )
     harness = make_harness(
         SummaryService(source, summarizer),
         allowed_user_ids=allowed_user_ids,
         template_handler=handler,
+        session=FakeSession(audio=audio),
     )
     return TemplateStand(
         harness=harness,
@@ -759,6 +892,7 @@ def make_template_stand(
         repository=repository,
         source=source,
         summarizer=summarizer,
+        speech=speech,
     )
 
 
@@ -787,6 +921,7 @@ __all__ = [
     "FAKE_SECRETS",
     "AppHarness",
     "FakeSession",
+    "FakeSpeechTranscriber",
     "FakeSummarizer",
     "FakeTemplateParser",
     "FakeTemplateRepository",
@@ -812,6 +947,7 @@ __all__ = [
     "make_template_summary",
     "make_update",
     "make_video",
+    "make_voice_update",
     "parse_frontmatter",
     "reply_buttons",
     "request_types",

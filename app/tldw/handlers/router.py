@@ -2,7 +2,7 @@
 
 Единая точка подключения слоя handlers к Dispatcher: корневой роутер получает
 сервис конспекта, allowlist из настроек и — когда шаблоны подключены — сервис
-шаблонов с разбором описания. Сборка не ходит в сеть.
+шаблонов с разбором описания и распознаванием речи. Сборка не ходит в сеть.
 
 Порядок регистрации важен (T-007): обработчик шаблона подключается **раньше**
 обработчика ссылок. Пока пользователь описывает шаблон, сообщение со ссылкой
@@ -12,13 +12,15 @@
 Проводка шаблона в генерацию (T-008): когда зависимости шаблона переданы,
 ``template_service`` уходит и в обработчик шаблона, и в обработчик ссылок —
 последний снимает активный шаблон отправителя и передаёт его в сервис конспекта.
+Голосовое описание (T-012) приходит в тот же обработчик шаблона через узкий
+протокол ``SpeechTranscriber``; ``None`` оставляет только текстовый ввод.
 Старый вызов ``create_router(service)`` остаётся валидным.
 """
 
 from aiogram import Router
 
 from tldw.handlers.link import LinkHandler, SummaryProcessor
-from tldw.handlers.template import TemplateHandler, TemplateParser
+from tldw.handlers.template import SpeechTranscriber, TemplateHandler, TemplateParser
 from tldw.services.template import TemplateService
 
 
@@ -28,6 +30,7 @@ def create_router(
     allowed_user_ids: tuple[int, ...] = (),
     template_service: TemplateService | None = None,
     template_parser: TemplateParser | None = None,
+    speech_transcriber: SpeechTranscriber | None = None,
 ) -> Router:
     """Создать корневой роутер: сначала шаблон, затем обработчик ссылок.
 
@@ -37,6 +40,8 @@ def create_router(
         подключается, а обработчик ссылок не применяет пользовательский шаблон
         и поведение остаётся прежним.
     :param template_parser: разбор описания шаблона (LLM-адаптер).
+    :param speech_transcriber: распознавание речи (адаптер); ``None`` — бот
+        предлагает текстовый ввод вместо голосового.
     :raises ValueError: если задана только одна из зависимостей шаблона.
     """
     router = Router(name="tldw")
@@ -46,6 +51,7 @@ def create_router(
         TemplateHandler(
             template_service,
             template_parser,
+            speech=speech_transcriber,
             allowed_user_ids=allowed_user_ids,
         ).register(router)
     LinkHandler(

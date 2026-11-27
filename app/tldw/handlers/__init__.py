@@ -18,6 +18,7 @@ from tldw.handlers.link import (
 from tldw.handlers.router import create_router
 from tldw.handlers.template import (
     TEMPLATE_BUTTON_TEXT,
+    SpeechTranscriber,
     TemplateAction,
     TemplateHandler,
     TemplateParser,
@@ -36,6 +37,7 @@ __all__ = [
     "MESSAGE_PROCESSING",
     "TEMPLATE_BUTTON_TEXT",
     "LinkHandler",
+    "SpeechTranscriber",
     "SummaryProcessor",
     "TemplateAction",
     "TemplateHandler",

@@ -212,11 +212,41 @@ T-011 вынесла разбор базового URL в общий `_parse_htt
 снова обрастает локальными проверками. См. `t011-review-issues.md` и
 `invalidurl-escapes-every-adapter.md`.
 
-## См. также
+## Цикл 12: константа переехала, а дубли остались
+
+T-012 перенесла `MAX_AUDIO_DURATION_SECONDS` в `tldw/config.py` (правильно:
+лимит — рядом с env-настройками), но ревью записало **четыре новых дубля**
+(P3), каждый — по одному источнику:
+
+- **два пути импорта одной константы:** `adapters/speech.py` оставил её в
+  `__all__` для совместимости, а `tests/test_readme.py` импортирует из
+  адаптера, новые тесты — из `config`. Выбирайте один публичный путь,
+  реэкспорт — только с пометкой «deprecated»;
+- **два текста одного лимита:** `MESSAGE_VOICE_TOO_LONG` в обработчике и
+  `MESSAGE_SPEECH_TOO_LONG` в адаптере. После предпроверки `is_configured`
+  и длительности сообщение адаптера из Telegram-пути недостижимо — вторую
+  редакцию надо было удалить или сделать общей;
+- **два списка состояний:** `_DESCRIPTION_STATES` и
+  `StateFilter(TemplateStates.waiting_description, TemplateStates.confirming_candidate)`
+  в `register()`. Достаточно `StateFilter(*_DESCRIPTION_STATES)`;
+- **дубль тестовых помощников:** `get_file_requests` + `AUDIO`/`VOICE_TEXT`
+  в `test_voice_handler.py` и `test_voice_e2e.py` — место в
+  `tests/support.py` (каркас `Harness`/`FakeSession` при этом переиспользован
+  правильно).
+
+Правило: **перенос константы — это ещё и удаление старого пути импорта и
+второй редакции текста.** Если реэкспорт нужен для совместимости, он должен
+быть один и назван в отчёте; иначе следующий агент импортирует из случайного
+места и не увидит расхождения. Для состояний FSM держите один кортеж и
+раскрывайте его в `StateFilter`, а не перечисляйте состояния дважды.
+
+
 
 - `app/memory/facts/t002-review-issues.md`, `t003-review-issues.md`,
   `t004-review-issues.md`, `t005-review-issues.md`, `t007-review-issues.md`,
   `t001-t010-review-issues.md` — история замечаний.
+- `app/memory/facts/cycle-12-spend.md` — четыре новых дубля T-012 (лимит,
+  константа, состояния, тестовый помощник).
 - `app/memory/facts/review-debt-accumulates.md` — почему долг не закрывается
   сам.
 - `app/memory/decisions/adr-002-layered-adapters.md` — границы слоёв.

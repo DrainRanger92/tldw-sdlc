@@ -9,7 +9,8 @@ description: Как писать тесты TLDW без сети и токено
 T-003 (YouTube-адаптер), T-004 (LLM-адаптер), T-005 (сервис конспекта),
 T-006 (Telegram-обработчик), T-007 (политика доступа), T-008 (ошибки и
 логи), T-009 (сквозной E2E и README), T-010 (шаблонный сценарий, 457 новых
-кейсов за цикл) и T-011 (адаптер распознавания речи, 52 кейса). В T-003 он дал 47 новых тестов без сети, токенов и `tmp_path`; в
+кейсов за цикл), T-011 (адаптер распознавания речи, 52 кейса) и T-012
+(голосовой обработчик 15 кейсов + 5 сквозных). В T-003 он дал 47 новых тестов без сети, токенов и `tmp_path`; в
 T-004 — 49 новых тестов (48 адаптера плюс тест упаковки); в T-005 — 45 новых
 кейсов, из которых часть пишет файлы в `tmp_path`; в T-006 — 21 кейс на
 фейковой сессии aiogram (13 без `tmp_path`); в T-007 — 27 кейсов, включая 15
@@ -20,8 +21,9 @@ README, минус переписанные кейсы обработчика); 
 (десять новых файлов, из них `test_template_handler.py` 30 сценариев,
 `test_template_e2e.py` 9 кейсов, `test_template_errors.py`, `test_wiring.py`);
 в T-011 — **52 кейса** `test_speech_adapter.py` на `MockTransport` и 9
-кейсов конфига (4 функции с параметризацией). Всего в наборе **893 теста**
-в 26 файлах.
+кейсов конфига (4 функции с параметризацией); в T-012 — **20 нетто**
+(`test_voice_handler.py` 15 + `test_voice_e2e.py` 5) и +14 в существующих
+файлах. Всего в наборе **927 тестов** в 28 файлах.
 
 ## Когда применять
 
@@ -58,7 +60,8 @@ README, минус переписанные кейсы обработчика); 
   `Authorization`, `httpx.Timeout` в `request.extensions`, одну попытку
   (`requests == []` до сети при лимите/без конфига) и `caplog` — аудио и
   текст распознавания не в логе. T-011: 52 кейса без `tmp_path`, файл
-  целиком проходит в read-only.
+  целиком проходит в read-only. Для обработчика (T-012) адаптер заменяется
+  `FakeSpeechTranscriber` из `support.py` — см. раздел «Голосовой ввод».
 - YouTube: фейковые клиенты адаптера; отдельные кейсы «нет субтитров»,
   «не YouTube», сбой основного источника и срабатывание fallback.
 - Никаких `time.sleep`, реальных сетевых адресов и токенов из окружения.
@@ -154,6 +157,34 @@ T-007/T-010 добавили третий тип сценария — диало
 В read-only песочнице ревьюера FSM-сценарии без `tmp_path` проходят
 (в цикле 10 — 30 тестов `test_template_handler.py`), а E2E с `tmp_path` —
 нет; это учитывать в отчёте.
+
+## Голосовой ввод: аудио в `FakeSession` и `FakeSpeechTranscriber`
+
+T-012 проверил медиа-путь без сети и файлов:
+
+- `FakeSession(audio=...)` отвечает на `GetFile` настоящим
+  `aiogram.types.File` (`file_path="voice/fake.oga"`), а `stream_content`
+  отдаёт байты; так проверяется реальный `bot.download(destination=BytesIO)`
+  без Telegram. Аудио — не пустое, чтобы `BytesIO` был непустым;
+- `FakeSpeechTranscriber` структурно реализует протокол
+  `SpeechTranscriber`: `text`, `error`, `configured`, `calls` (байты +
+  длительность) и `thread_ids`. Проверяйте:
+  - `calls == []`, если allowlist/состояние/`is_configured`/лимит
+    отсекли сообщение **до** распознавания;
+  - `calls[0][1] == float(voice.duration)` — длительность доходит до
+    адаптера;
+  - `thread_ids[0] != threading.get_ident()` — `asyncio.to_thread`, а не
+    блокировка loop;
+  - `error` → сообщение `MESSAGE_VOICE_RETRY`/`report.user_message`,
+    `state` сброшен в `waiting_description`, активный шаблон не изменён;
+- голосовой апдейт собирается как обычный `Update.model_validate` с
+  `message.voice = {file_id, file_unique_id, duration, mime_type}`; кнопки
+  и тексты проверяются тем же `AppHarness`, что и текст;
+- **E2E с голосом пишет `DATA_DIR`** (`test_voice_e2e.py`), поэтому в
+  read-only не исполняется — как и остальные E2E; unit-файл
+  `test_voice_handler.py` (15 кейсов) проходит целиком;
+- не дублируйте `get_file_requests`/`AUDIO`/`VOICE_TEXT` в двух файлах:
+  место общих помощников — `tests/support.py` (P3 T-012).
 
 ## README под тестами
 
@@ -324,20 +355,23 @@ cd app
 Тесты без файловых операций (как `test_youtube_adapter.py`,
 `test_llm_adapter.py`, `test_access.py`, `test_errors.py` и `test_readme.py`)
 не используют `tmp_path` и потому проходят даже в read-only песочнице
-ревьюера. После T-011 полный набор — **893 теста в 26 файлах**; файлы
+ревьюера. После T-012 полный набор — **927 тестов в 28 файлах**; файлы
 адаптеров (включая `test_speech_adapter.py` — 52 кейса), `test_access.py`,
-`test_errors.py`, `test_readme.py`,
-`test_template.py`, `test_template_parser.py` и `test_template_handler.py`
-(30 сценариев FSM) проходят в read-only целиком или почти целиком, а
-`test_storage_templates.py`, `test_summary_templates.py`,
-`test_template_e2e.py`, `test_summary_service.py`, `test_storage_notes.py`,
-`test_e2e.py` и файловая часть `test_link_handler.py` — только частично: в
+`test_errors.py`, `test_readme.py`, `test_template.py`,
+`test_template_parser.py`, `test_template_handler.py` (30 сценариев FSM) и
+`test_voice_handler.py` (15 кейсов) проходят в read-only целиком или почти
+целиком, а `test_storage_templates.py`, `test_summary_templates.py`,
+`test_template_e2e.py`, `test_voice_e2e.py`, `test_summary_service.py`,
+`test_storage_notes.py`, `test_e2e.py` и файловая часть
+`test_link_handler.py` — только частично: в
 цикле 7 полный прогон дал 34 passed + 9 env-errors в двух файлах и 5 passed +
 52 env-errors в `test_config`/`test_bootstrap`/`test_cli`, в цикле 8 — 243
 passed + 93 env-errors из 343, в цикле 9 полный прогон недоступен, в цикле
 10 — 158 passed из 828 (19 %), а оба E2E-файла и хранение шаблонов не
 исполнялись, **в цикле 11 — 685 passed + 208 env-errors из 893 (77 %)**,
-`test_speech_adapter.py` прошёл целиком. Поэтому сценарные кейсы, которым
+`test_speech_adapter.py` прошёл целиком, **в цикле 12 — 703 passed + 224
+env-errors из 927 (76 %)**, `test_voice_handler.py` 15/15, `test_readme.py`
+41/41, `test_voice_e2e.py` не исполнялся. Поэтому сценарные кейсы, которым
 нужен `tmp_path`, оставляйте гейту VERIFY, а в read-only проверяйте чистые
 функции и не-файловые ветки.
 
@@ -367,6 +401,10 @@ passed + 93 env-errors из 343, в цикле 9 полный прогон не�
   фейковой сессии, `feed_update`, `wait_idle` и проверки `to_thread`.
 - `app/memory/facts/t011-review-issues.md` — 52 кейса `SpeechAdapter`,
   `MockTransport`, multipart и приватность логов.
+- `app/memory/facts/cycle-12-spend.md` — 20 новых кейсов T-012, 927 тестов,
+  `FakeSession` с аудио и E2E, который не идёт в read-only.
+- `app/memory/decisions/adr-016-voice-input-flow.md` — голосовой путь и его
+  проверки.
 - `app/memory/decisions/adr-015-speech-adapter.md` — контракт адаптера речи.
 - `app/memory/facts/t006-review-issues.md` — что ревью T-006 нашло в тестах
   (флаки-таймауты, типы тест-дублей) и в обработчике.

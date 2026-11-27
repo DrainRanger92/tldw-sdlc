@@ -151,9 +151,43 @@ def test_router_registers_template_handler_before_link_handler() -> None:
         TemplateHandler,
         TemplateHandler,
         TemplateHandler,
+        TemplateHandler,
         LinkHandler,
     ]
     assert len(router.callback_query.handlers) == 1
+
+
+def registered_template_methods(router: Router) -> list[str]:
+    """Имена методов ``TemplateHandler`` в порядке регистрации."""
+    return [
+        getattr(handler.callback, "__name__", "")
+        for handler in router.message.handlers
+        if isinstance(getattr(handler.callback, "__self__", None), TemplateHandler)
+    ]
+
+
+def test_router_registers_voice_handler_after_description() -> None:
+    """Голосовой обработчик подключён в сценарии шаблона, до обработчика ссылок.
+
+    Порядок «описание → голос» фиксирован: F.voice не конкурирует с F.text, а
+    allowlist проверяется в самом обработчике голоса. Регистрация раньше
+    обработчика ссылок важна и для голосовых сообщений.
+    """
+    templates, _ = saved_templates()
+    router = create_router(
+        UnusedSummaryService(),
+        template_service=templates,
+        template_parser=FakeTemplateParser(),
+    )
+
+    assert registered_template_methods(router) == [
+        "handle_open",
+        "handle_open",
+        "handle_description",
+        "handle_voice",
+    ]
+    owners = registered_owners(router)
+    assert owners.index(LinkHandler) == len(owners) - 1
 
 
 def test_router_passes_active_template_of_the_sender_to_summary_service(
@@ -273,9 +307,11 @@ def test_bootstrap_builds_one_llm_client_for_summary_and_template_parser(
         allowed_user_ids: tuple[int, ...] = (),
         template_service: object | None = None,
         template_parser: object | None = None,
+        speech_transcriber: object | None = None,
     ) -> Router:
         captured["template_service"] = template_service
         captured["template_parser"] = template_parser
+        captured["speech_transcriber"] = speech_transcriber
         return Router(name="tldw")
 
     monkeypatch.setattr("tldw.bootstrap.build_llm_client", fake_build_llm_client)
@@ -288,6 +324,9 @@ def test_bootstrap_builds_one_llm_client_for_summary_and_template_parser(
         assert captured["llm_client"] is client
         assert captured["template_parser"] is client, "разбор описания использует тот же клиент"
         assert isinstance(captured["template_service"], TemplateService)
+        speech = captured["speech_transcriber"]
+        assert speech is not None, "адаптер распознавания речи должен собираться"
+        assert speech.is_configured is False, "без SPEECH_* голосовой ввод выключен"
     finally:
         asyncio.run(application.close())
 
@@ -326,6 +365,7 @@ def test_build_application_wires_both_handlers_with_defaults(
     try:
         (router,) = application.dispatcher.sub_routers
         assert registered_owners(router) == [
+            TemplateHandler,
             TemplateHandler,
             TemplateHandler,
             TemplateHandler,

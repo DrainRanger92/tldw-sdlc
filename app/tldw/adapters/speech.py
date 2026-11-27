@@ -38,6 +38,7 @@ import httpx
 from tldw.config import (
     DEFAULT_SPEECH_BASE_URL,
     DEFAULT_SPEECH_TIMEOUT_SECONDS,
+    MAX_AUDIO_DURATION_SECONDS,
     Settings,
 )
 from tldw.errors import UserFacingError
@@ -46,8 +47,6 @@ log = logging.getLogger(__name__)
 
 #: Путь OpenAI-совместимого API распознавания относительно ``SPEECH_BASE_URL``.
 TRANSCRIPTIONS_PATH: Final = "audio/transcriptions"
-#: Жёсткий лимит длительности голосового сообщения, секунды (FR-11).
-MAX_AUDIO_DURATION_SECONDS: Final = 60
 #: Имя файла по умолчанию: голосовые сообщения Telegram — OGG/Opus.
 DEFAULT_AUDIO_FILENAME: Final = "audio.ogg"
 #: MIME-тип аудио по умолчанию.

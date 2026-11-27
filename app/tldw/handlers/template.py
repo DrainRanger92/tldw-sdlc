@@ -19,6 +19,21 @@
    возвращает к вводу, новое описание заменяет кандидата; «Отмена» и «Закрыть»
    закрывают сценарий без изменений.
 
+Второй способ ввести описание — голосовое сообщение (T-012, FR-11). Оно идёт
+**тем же** путём, что и текст, но с дополнительными шагами до разбора. Порядок
+проверок важен и закреплён ADR-015: allowlist → состояние сценария →
+настроена ли граница распознавания → длительность → скачивание аудио →
+:func:`asyncio.to_thread` вокруг синхронного распознавания → «разбор → показ
+кандидата → Сохранить/Исправить/Отмена». Поэтому посторонний, слишком длинное
+аудио и ненастроенный адаптер не тратят ни скачивание, ни распознавание.
+Голосовое сообщение вне шага изменения получает подсказку, как войти в
+сценарий; без настроенного адаптера бот сообщает, что доступен текстовый ввод.
+Распознавание — **одна** попытка на сообщение, без повторов. Ошибка
+распознавания не меняет активный шаблон и не создаёт кандидата: пользователь
+возвращается к вводу описания. Аудио живёт только в памяти: в ``DATA_DIR`` оно
+не сохраняется, а в лог не попадают ни аудио, ни полный текст распознавания —
+только длительность, число байт/символов и тип ошибки.
+
 Кандидат живёт только в FSM (``MemoryStorage``): в каталог данных он не попадает
 и на генерацию заметок не влияет до явного «Сохранить». Перезапуск бота теряет
 кандидата, но подтверждённый шаблон остаётся в хранилище, поэтому активный
@@ -38,15 +53,16 @@
 
 Слой остаётся тонким (ADR-002): обработчик проверяет доступ, ведёт диалог,
 показывает шаблон и вызывает :class:`tldw.services.template.TemplateService`.
-Разбор описания приходит через узкий протокол :class:`TemplateParser`, поэтому
-Telegram-слой не импортирует ``httpx`` и адаптер LLM. Ошибки разбора,
-валидации и записи — :class:`tldw.errors.UserFacingError`; обработчик отдаёт
-пользователю их текст, а причину пишет в лог через
-:func:`tldw.errors.log_failure` с контекстом «разбора/сохранения/сброса
-шаблона (происхождение, разделов: N)», поэтому запись говорит о шаблоне, а не
-о видео, и не раскрывает описание, тон, JSON кандидата и секреты. Известный
-сбой оставляет прежний активный шаблон и не создаёт кандидата; неизвестный
-даёт общее сообщение и ``ERROR`` со стектрейсом.
+Разбор описания приходит через узкий протокол :class:`TemplateParser`, а
+распознавание речи — через :class:`SpeechTranscriber`, поэтому Telegram-слой не
+импортирует ``httpx`` и адаптеры. Ошибки разбора, распознавания, валидации и
+записи — :class:`tldw.errors.UserFacingError`; обработчик отдаёт пользователю их
+текст, а причину пишет в лог через :func:`tldw.errors.log_failure` с контекстом
+«разбора/распознавания/сохранения/сброса шаблона (происхождение, разделов: N)»,
+поэтому запись говорит о шаблоне, а не о видео, и не раскрывает описание, тон,
+аудио, распознанный текст, JSON кандидата и секреты. Известный сбой оставляет
+прежний активный шаблон и не создаёт кандидата; неизвестный даёт общее сообщение
+и ``ERROR`` со стектрейсом.
 
 Заголовки и тон — пользовательские данные, а не разметка: все сообщения и
 правки сценария уходят с ``parse_mode=None``, поэтому заголовок с ``<``, ``>``
@@ -58,6 +74,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from io import BytesIO
 from typing import Final, Protocol
 
 from aiogram import F, Router
@@ -76,6 +93,7 @@ from aiogram.types import (
 )
 
 from tldw.access import AccessPolicy
+from tldw.config import MAX_AUDIO_DURATION_SECONDS
 from tldw.errors import log_failure
 from tldw.handlers.link import MESSAGE_ACCESS_DENIED, extract_first_url
 from tldw.services.template import (
@@ -139,6 +157,31 @@ MESSAGE_PARSING: Final = "⏳ Разбираю описание…"
 MESSAGE_CANDIDATE_TITLE: Final = "🤔 Кандидат шаблона. Проверьте, что получилось:"
 MESSAGE_CANDIDATE_HINT: Final = "Сохранить этот шаблон?"
 
+#: Голосовой ввод (T-012): подсказки до и после распознавания.
+MESSAGE_VOICE_NOT_EXPECTED: Final = (
+    "Голосовое описание принимаю только на шаге изменения шаблона: "
+    f"откройте /template и нажмите «{BUTTON_EDIT}»."
+)
+MESSAGE_VOICE_UNAVAILABLE: Final = (
+    "Голосовой ввод недоступен: распознавание речи не настроено. "
+    "Пришлите описание текстом — сценарий шаблона работает как обычно."
+)
+MESSAGE_VOICE_TOO_LONG: Final = (
+    "Голосовое сообщение длиннее {limit} секунд. "
+    "Запишите описание короче или отправьте его текстом."
+)
+MESSAGE_VOICE_DOWNLOAD_FAILED: Final = (
+    "Не удалось получить голосовое сообщение. "
+    "Запишите его ещё раз или отправьте описание текстом."
+)
+MESSAGE_VOICE_EMPTY: Final = (
+    "Не удалось распознать речь в голосовом сообщении. "
+    "Запишите его ещё раз или отправьте описание текстом."
+)
+MESSAGE_VOICE_RETRY: Final = (
+    "Запишите описание ещё раз голосом или отправьте его текстом."
+)
+
 #: Итоги действий сценария.
 MESSAGE_SAVED: Final = "✅ Шаблон сохранён. Следующие ссылки обработаю по нему."
 MESSAGE_CLOSED: Final = "Сценарий закрыт, шаблон не изменён."
@@ -180,6 +223,15 @@ class TemplateStates(StatesGroup):
     confirming_reset = State()
 
 
+#: Состояния, в которых принимается описание — текстовое или голосовое.
+_DESCRIPTION_STATES: Final = frozenset(
+    {
+        TemplateStates.waiting_description.state,
+        TemplateStates.confirming_candidate.state,
+    }
+)
+
+
 class TemplateParseResult(Protocol):
     """Нейтральный результат разбора описания.
 
@@ -210,6 +262,25 @@ class TemplateParser(Protocol):
         current_tone: str = "",
     ) -> TemplateParseResult:
         """Разобрать описание в патч относительно текущего активного шаблона."""
+        ...
+
+
+class SpeechTranscriber(Protocol):
+    """Узкий интерфейс распознавания речи (его реализует ``SpeechAdapter``).
+
+    ``is_configured`` позволяет предложить текстовый ввод без обращения к сети,
+    а синхронный ``transcribe`` вызывается через :func:`asyncio.to_thread`.
+    Лимит длительности — общая константа :data:`tldw.config.MAX_AUDIO_DURATION_SECONDS`,
+    поэтому обработчику не нужны дополнительные методы адаптера.
+    """
+
+    @property
+    def is_configured(self) -> bool:
+        """Настроена ли граница распознавания (ключ и модель из env)."""
+        ...
+
+    def transcribe(self, audio: bytes, *, duration_seconds: float) -> str:
+        """Распознать речь одним запросом и вернуть текст."""
         ...
 
 
@@ -327,12 +398,18 @@ class TemplateHandler:
     :param templates: сервис шаблонов (чтение активного, сохранение, сброс,
         слияние правки с текущим шаблоном).
     :param parser: разбор описания человеческим языком (реализация — LLM-адаптер).
+    :param speech: распознавание речи (реализация — ``SpeechAdapter``);
+        ``None`` — голосовой ввод не подключён, бот предлагает текст.
     :param allowed_user_ids: allowlist из конфига; пустой кортеж — доступ всем.
 
     Порядок регистрации важен: команда и кнопка открывают сценарий в любом
-    состоянии, затем идёт приём описания, затем callback. Обработчик ссылок
-    подключается после (см. :func:`tldw.handlers.router.create_router`), поэтому
-    ссылка во время ввода описания не запускает обработку видео.
+    состоянии, затем идёт приём описания и голоса, затем callback. Обработчик
+    ссылок подключается после (см. :func:`tldw.handlers.router.create_router`),
+    поэтому ссылка во время ввода описания не запускает обработку видео.
+
+    Голос регистрируется без фильтра состояния: так allowlist проверяется
+    первой строкой для **любого** голосового сообщения, а не только когда
+    пользователь уже в шаге изменения (ADR-015).
     """
 
     def __init__(
@@ -340,10 +417,12 @@ class TemplateHandler:
         templates: TemplateService,
         parser: TemplateParser,
         *,
+        speech: SpeechTranscriber | None = None,
         allowed_user_ids: tuple[int, ...] = (),
     ) -> None:
         self._templates = templates
         self._parser = parser
+        self._speech = speech
         self._access = AccessPolicy(allowed_user_ids)
 
     def register(self, router: Router) -> None:
@@ -358,6 +437,7 @@ class TemplateHandler:
             ),
             F.text,
         )
+        router.message.register(self.handle_voice, F.voice)
         router.callback_query.register(self.handle_callback, TemplateAction.filter())
 
     async def handle_open(self, message: Message, state: FSMContext) -> None:
@@ -404,10 +484,9 @@ class TemplateHandler:
 
         Сообщение со ссылкой не запускает обработку видео ни в ожидании
         описания, ни при показанном кандидате: пользователь получает просьбу
-        закончить/отменить описание или разобраться с кандидатом. Разбор
-        синхронного клиента LLM уходит в рабочий поток, поэтому event loop не
-        блокируется. Ошибка разбора оставляет прежний активный шаблон и
-        возвращает к вводу.
+        закончить/отменить описание или разобраться с кандидатом. Дальше текст
+        идёт общим с голосом путём :meth:`_present_description`: лимиты,
+        разбор в рабочем потоке, показ кандидата и обработка ошибок.
         """
         user_id = _sender_id(message)
         if user_id is None or not self._access.is_allowed(user_id):
@@ -425,6 +504,132 @@ class TemplateHandler:
                 parse_mode=None,
             )
             return
+        await self._present_description(message, state, user_id, text)
+
+    async def handle_voice(self, message: Message, state: FSMContext) -> None:
+        """Принять голосовое описание: проверить, скачать, распознать, показать.
+
+        Порядок закреплён ADR-015 и не случаен:
+
+        1. allowlist — первой строкой: посторонний не тратит скачивание и
+           распознавание;
+        2. состояние сценария: голос принимается только на шаге изменения,
+           иначе пользователь получает подсказку, как войти в сценарий;
+        3. ``is_configured`` — до длительности: ненастроенный адаптер говорит
+           «доступен текст», а не «слишком длинное аудио»;
+        4. длительность — до скачивания: ``voice.duration`` из апдейта
+           сверяется с :data:`tldw.config.MAX_AUDIO_DURATION_SECONDS`;
+        5. скачивание — в память (``BytesIO``), без записи в ``DATA_DIR``;
+        6. распознавание — одна попытка через :func:`asyncio.to_thread`;
+        7. дальше общий путь «разбор → показ кандидата → подтверждение».
+
+        Ошибка скачивания или распознавания не меняет активный шаблон: при
+        сбое распознавания кандидат и состояние сбрасываются, и пользователь
+        возвращается к вводу. Аудио и распознанный текст в лог не попадают.
+        """
+        user_id = _sender_id(message)
+        if user_id is None or not self._access.is_allowed(user_id):
+            _log_denied("голосовое описание", user_id)
+            await message.answer(MESSAGE_ACCESS_DENIED, parse_mode=None)
+            return
+
+        current_state = await state.get_state()
+        if current_state not in _DESCRIPTION_STATES:
+            await message.answer(MESSAGE_VOICE_NOT_EXPECTED, parse_mode=None)
+            return
+
+        speech = self._speech
+        if speech is None or not speech.is_configured:
+            log.info("Шаблон: голосовой ввод недоступен, предложен текст")
+            await message.answer(
+                MESSAGE_VOICE_UNAVAILABLE,
+                reply_markup=cancel_keyboard(),
+                parse_mode=None,
+            )
+            return
+
+        voice = message.voice
+        if voice is None:  # pragma: no cover - защита от вызова без F.voice
+            await message.answer(
+                MESSAGE_VOICE_UNAVAILABLE,
+                reply_markup=cancel_keyboard(),
+                parse_mode=None,
+            )
+            return
+
+        if voice.duration > MAX_AUDIO_DURATION_SECONDS:
+            log.warning(
+                "Шаблон: голосовое описание длиннее лимита (%s с > %s с)",
+                voice.duration,
+                MAX_AUDIO_DURATION_SECONDS,
+            )
+            await message.answer(
+                MESSAGE_VOICE_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS),
+                reply_markup=cancel_keyboard(),
+                parse_mode=None,
+            )
+            return
+
+        try:
+            audio = await self._download_voice(message)
+        except Exception as exc:  # noqa: BLE001 - сбой Telegram не должен всплывать
+            # Аудио не скачалось: сценарий и активный шаблон не меняются,
+            # пользователь может записать сообщение снова или прислать текст.
+            log_failure(
+                exc,
+                logger=log,
+                context=self._failure_context("скачивания голосового", user_id),
+            )
+            await message.answer(
+                MESSAGE_VOICE_DOWNLOAD_FAILED,
+                reply_markup=cancel_keyboard(),
+                parse_mode=None,
+            )
+            return
+
+        try:
+            text = await asyncio.to_thread(self._transcribe, audio, float(voice.duration))
+        except Exception as exc:  # noqa: BLE001 - обработчик не должен падать молча
+            # Сбой распознавания оставляет прежний активный шаблон и не создаёт
+            # кандидата; старый неподтверждённый кандидат тоже отбрасывается.
+            await state.set_data({})
+            await state.set_state(TemplateStates.waiting_description)
+            report = log_failure(
+                exc,
+                logger=log,
+                context=self._failure_context("распознавания", user_id),
+            )
+            await message.answer(
+                f"{report.user_message}\n\n{MESSAGE_VOICE_RETRY}",
+                reply_markup=cancel_keyboard(),
+                parse_mode=None,
+            )
+            return
+
+        text = text.strip()
+        if not text:
+            log.warning("Шаблон: распознавание вернуло пустой текст")
+            await message.answer(
+                MESSAGE_VOICE_EMPTY,
+                reply_markup=cancel_keyboard(),
+                parse_mode=None,
+            )
+            return
+        await self._present_description(message, state, user_id, text)
+
+    async def _present_description(
+        self,
+        message: Message,
+        state: FSMContext,
+        user_id: int,
+        text: str,
+    ) -> None:
+        """Общий путь описания: лимиты, разбор в потоке и показ кандидата.
+
+        Текст приходит из сообщения или из распознавания речи — дальше разницы
+        нет: проверяются те же лимиты, кандидат показывается теми же кнопками,
+        а ошибка разбора оставляет прежний активный шаблон.
+        """
         if len(text) < MIN_DESCRIPTION_LENGTH:
             await message.answer(
                 MESSAGE_DESCRIPTION_EMPTY,
@@ -477,6 +682,42 @@ class TemplateHandler:
             reply_markup=candidate_keyboard(),
             parse_mode=None,
         )
+
+    async def _download_voice(self, message: Message) -> bytes:
+        """Скачать голосовое сообщение в память: на диск оно не попадает.
+
+        Используется путь aiogram ``Bot.download`` с ``BytesIO``: файл живёт
+        только в памяти обработчика и уходит в адаптер байтами. Скачивание идёт
+        по ``file_id`` (поддерживается всеми aiogram 3.x), а возвращаются ровно
+        те байты, которые отдал Telegram; в логе — только их размер.
+        """
+        bot = message.bot
+        voice = message.voice
+        if bot is None or voice is None:
+            raise RuntimeError("голосовое сообщение недоступно для скачивания")
+        buffer = BytesIO()
+        downloaded = await bot.download(voice.file_id, destination=buffer)
+        if downloaded is None:  # pragma: no cover - Bot.download отдаёт буфер
+            raise RuntimeError("Telegram не вернул содержимое голосового сообщения")
+        audio = downloaded.getvalue()
+        log.info("Шаблон: голосовое получено (%s байт)", len(audio))
+        return audio
+
+    def _transcribe(self, audio: bytes, duration_seconds: float) -> str:
+        """Синхронное распознавание — в рабочем потоке, одна попытка.
+
+        В лог пишутся только длительность и тип результата: аудио и полный текст
+        распознавания — пользовательские данные (ADR-009, FR-12). Число
+        байт/символов пишет сам адаптер.
+        """
+        speech = self._speech
+        if speech is None:  # pragma: no cover - вызывается после проверки
+            raise RuntimeError("распознавание речи не подключено")
+        log.info(
+            "Шаблон: распознавание голосового описания (%.1f с)",
+            duration_seconds,
+        )
+        return speech.transcribe(audio, duration_seconds=duration_seconds)
 
     def _parse(self, user_id: int, description: str) -> NoteTemplate:
         """Синхронный разбор описания: текущий активный шаблон + текст → кандидат.
@@ -793,7 +1034,14 @@ __all__ = [
     "MESSAGE_TONE_MISSING",
     "MESSAGE_VIEW_ACTIONS",
     "MESSAGE_VIEW_TITLE",
+    "MESSAGE_VOICE_DOWNLOAD_FAILED",
+    "MESSAGE_VOICE_EMPTY",
+    "MESSAGE_VOICE_NOT_EXPECTED",
+    "MESSAGE_VOICE_RETRY",
+    "MESSAGE_VOICE_TOO_LONG",
+    "MESSAGE_VOICE_UNAVAILABLE",
     "TEMPLATE_BUTTON_TEXT",
+    "SpeechTranscriber",
     "TemplateAction",
     "TemplateHandler",
     "TemplateParseResult",

@@ -8,6 +8,7 @@ env всегда приоритетнее). Модуль не ходит в се
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping, MutableMapping
@@ -37,6 +38,9 @@ ENV_LOG_LEVEL = "LOG_LEVEL"
 DEFAULT_SPEECH_BASE_URL = "https://api.openai.com/v1"
 #: Таймаут одного запроса распознавания речи по умолчанию, секунды.
 DEFAULT_SPEECH_TIMEOUT_SECONDS = 60.0
+#: Жёсткий лимит длительности голосового сообщения, секунды (FR-11).
+#: Живёт в нейтральном конфиге, чтобы адаптер и обработчик не дублировали 60.
+MAX_AUDIO_DURATION_SECONDS = 60
 
 ENV_SPEECH_API_KEY = "SPEECH_API_KEY"
 ENV_SPEECH_BASE_URL = "SPEECH_BASE_URL"
@@ -265,6 +269,10 @@ def _parse_float(raw: str | None, name: str, *, default: float, minimum: float) 
         value = float(raw)
     except ValueError:
         raise ConfigError(f"{name} должна быть числом.") from None
+    if not math.isfinite(value):
+        # inf/nan проходят float(), но таймаут с ними ломает httpx и адаптер;
+        # лучше понятная ошибка конфигурации при старте.
+        raise ConfigError(f"{name} должна быть конечным числом.")
     if value < minimum:
         raise ConfigError(f"{name} должна быть не меньше {minimum}.")
     return value
@@ -322,6 +330,7 @@ __all__ = [
     "ConfigError",
     "DEFAULT_DATA_DIR",
     "DEFAULT_ENV_FILE",
+    "MAX_AUDIO_DURATION_SECONDS",
     "OPTIONAL_ENV_VARS",
     "REQUIRED_ENV_VARS",
     "Settings",

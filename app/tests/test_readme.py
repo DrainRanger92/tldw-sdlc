@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from support import FAKE_SECRETS
 
+from tldw.adapters.speech import MAX_AUDIO_DURATION_SECONDS
 from tldw.config import ALL_ENV_VARS
 from tldw.handlers import MESSAGE_ACCEPTED, MESSAGE_DONE, MESSAGE_PROCESSING
 from tldw.handlers.template import (
@@ -35,6 +36,11 @@ from tldw.handlers.template import (
     MESSAGE_SAVED,
     MESSAGE_STALE_CANDIDATE,
     MESSAGE_TONE_MISSING,
+    MESSAGE_VOICE_DOWNLOAD_FAILED,
+    MESSAGE_VOICE_EMPTY,
+    MESSAGE_VOICE_RETRY,
+    MESSAGE_VOICE_TOO_LONG,
+    MESSAGE_VOICE_UNAVAILABLE,
     TEMPLATE_BUTTON_TEXT,
 )
 from tldw.services.note import FRONTMATTER_KEYS, SECTION_HEADINGS
@@ -164,6 +170,39 @@ def test_readme_describes_template_scenario() -> None:
     assert "Разделы:" in text, "нужен пример описания разделов"
     assert "Тон:" in text, "нужен пример тона"
     assert "Примеры кода" in text, "нужен пример пользовательского раздела"
+
+
+def test_readme_describes_voice_input() -> None:
+    """Голосовой ввод: необязательные env, лимит и путь до подтверждения."""
+    text = readme_text()
+
+    assert "Голосовой ввод" in text, "нужен раздел о голосовом вводе"
+    for name in ("SPEECH_API_KEY", "SPEECH_MODEL", "SPEECH_BASE_URL", "SPEECH_TIMEOUT_SECONDS"):
+        assert name in text, f"переменная {name} не описана в настройке голоса"
+    assert f"{MAX_AUDIO_DURATION_SECONDS} секунд" in text, "лимит 60 секунд не описан"
+    assert "одной попыткой" in text, "одна попытка распознавания не описана"
+    for message in (
+        MESSAGE_VOICE_UNAVAILABLE,
+        MESSAGE_VOICE_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS),
+        MESSAGE_VOICE_DOWNLOAD_FAILED,
+        MESSAGE_VOICE_EMPTY,
+        MESSAGE_VOICE_RETRY,
+    ):
+        assert message in text, f"сообщение голосового ввода {message!r} не описано"
+    assert "автоматическ" in text.lower(), "нужно сказать, что автосохранения нет"
+    for button in ("Сохранить", "Исправить", "Отмена"):
+        assert button in text, f"кнопка {button!r} не описана в голосовом сценарии"
+
+
+def test_readme_warns_about_voice_cost_and_privacy() -> None:
+    """README предупреждает о стоимости распознавания и приватности аудио."""
+    lowered = readme_text().lower()
+
+    assert "стоимост" in lowered, "нет предупреждения о стоимости"
+    assert "платн" in lowered, "не сказано, что распознавание платное"
+    assert "не сохраняется" in lowered, "не сказано, что аудио не сохраняется"
+    assert "data_dir" in lowered, "не указано, где аудио не сохраняется"
+    assert "полный текст распознавания" in lowered, "текст распознавания не должен попадать в лог"
 
 
 @pytest.mark.parametrize(

@@ -103,3 +103,17 @@ T-007 добавил третий тип обработчика — диалог
 `asyncio.to_thread` и проверять `threading.get_ident`; для FSM использовать
 настоящий `Dispatcher` с `MemoryStorage`, чтобы проверить фильтры состояний и
 порядок роутеров (`template` раньше `link`).
+
+## Цикл 12: голосовое сообщение на том же каркасе
+
+T-012 добавила `handle_voice` и не изменила каркас: `FakeSession` получила
+параметр `audio`, на `GetFile` отвечает настоящим `File` с
+`file_path="voice/fake.oga"`, а `stream_content` отдаёт байты — так
+`bot.download(destination=BytesIO)` проверяется без сети. Голосовой апдейт
+собирается тем же `Update.model_validate` с `message.voice` (`file_id`,
+`duration`, `mime_type`); `FakeSpeechTranscriber` пишет `calls`
+(байты + длительность) и `thread_ids`, поэтому одним тестом проверяются
+«до распознавания не дошли» (`calls == []`), `to_thread`
+(`thread_ids[0] != get_ident()`) и текст/ошибка. 15 кейсов
+`test_voice_handler.py` проходят в read-only целиком, 5 сквозных
+`test_voice_e2e.py` — нет (пишут `DATA_DIR`). Полный набор — 927 тестов.

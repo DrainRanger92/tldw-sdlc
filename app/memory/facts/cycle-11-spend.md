@@ -126,7 +126,10 @@ T-011 помечена **M**, без подкласса и без прогноз
 - **T-012 (голосовой ввод в Telegram) — M3, а не M.** Ей нужны обработчик,
   allowlist до скачивания/распознавания, `to_thread`, FSM, E2E и README;
   прогноз — `EXECUTE 80–115 + REVIEW 25–40 = 105–155` шагов, 65–95 тыс.
-  output, с риском FIX, если ревью вернёт `ISSUES`.
+  output, с риском FIX, если ревью вернёт `ISSUES`. **Факт цикла 12:**
+  134 + 63 = 197 шагов — прогноз M3 промахнулся, потолок M3 сломан,
+  фактический класс — M4 (`cycle-12-spend.md`,
+  `estimate-m3-ceiling-broken.md`).
 - **Долг вырос на 6 групп** (2 P2 + 4 P3), FIX не было: 77 → **83** пункта;
   P1 T-004/T-005 по-прежнему открыты, а `InvalidURL` повторился в новом
   адаптере (`invalidurl-escapes-every-adapter.md`,
@@ -137,6 +140,7 @@ T-011 помечена **M**, без подкласса и без прогноз
 
 Связанные: `t011-review-issues.md`, `single-task-pull-from-backlog.md`,
 `estimate-backlog-label-stale.md`, `invalidurl-escapes-every-adapter.md`,
+`cycle-12-spend.md`, `estimate-m3-ceiling-broken.md`,
 `tldw-baseline-after-t011.md`, `cycle-10-spend.md`,
 `batch-increment-single-review.md`, `review-debt-accumulates.md`,
 `review-diff-untracked.md`, `reviewer-readonly-tests.md`,

@@ -165,7 +165,7 @@ def test_invalid_video_duration_is_rejected(fake_env: dict[str, str], value: str
         load_settings(env)
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "soon"])
+@pytest.mark.parametrize("value", ["0", "-1", "soon", "inf", "nan", "-inf"])
 def test_invalid_llm_timeout_is_rejected(fake_env: dict[str, str], value: str) -> None:
     env = {**fake_env, "LLM_TIMEOUT_SECONDS": value}
 
@@ -217,7 +217,7 @@ def test_blank_speech_value_means_not_configured(
     assert getattr(settings, attribute) == ""
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "soon"])
+@pytest.mark.parametrize("value", ["0", "-1", "soon", "inf", "nan", "-inf"])
 def test_invalid_speech_timeout_is_rejected(fake_env: dict[str, str], value: str) -> None:
     env = {**fake_env, "SPEECH_TIMEOUT_SECONDS": value}
 

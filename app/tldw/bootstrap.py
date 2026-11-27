@@ -17,8 +17,14 @@
   регистрирует обработчик шаблона раньше обработчика ссылок и проводит
   ``template_service`` в обработчик ссылки.
 
-Сервис конспекта и разбор шаблона можно подменить явно (сквозные тесты) — тогда
-соответствующий адаптер не собирается.
+Голосовой ввод (T-012, FR-11): :class:`tldw.adapters.speech.SpeechAdapter`
+собирается из необязательных ``SPEECH_*`` и уходит в обработчик шаблона через
+узкий протокол ``SpeechTranscriber``. Без ключа и модели адаптер создаётся, но
+не настроен, поэтому текстовый сценарий работает как обычно, а бот предлагает
+текстовый ввод. Сеть при сборке не используется.
+
+Сервис конспекта, разбор шаблона и распознавание речи можно подменить явно
+(сквозные тесты) — тогда соответствующий адаптер не собирается.
 """
 
 from __future__ import annotations
@@ -33,7 +39,12 @@ from aiogram.enums import ParseMode
 
 from tldw.access import describe_allowlist, warn_if_open_access
 from tldw.config import Settings
-from tldw.handlers import SummaryProcessor, TemplateParser, create_router
+from tldw.handlers import (
+    SpeechTranscriber,
+    SummaryProcessor,
+    TemplateParser,
+    create_router,
+)
 from tldw.services.summary import SummaryProvider, SummaryService
 from tldw.services.template import TemplateService
 from tldw.storage import TemplateStore, ensure_data_dir
@@ -84,6 +95,19 @@ def build_template_service(settings: Settings) -> TemplateService:
     return TemplateService(TemplateStore(settings.data_dir))
 
 
+def build_speech_transcriber(settings: Settings) -> SpeechTranscriber:
+    """Собрать адаптер распознавания речи из необязательных ``SPEECH_*``.
+
+    Обращений к сети нет: без ключа или модели адаптер создаётся, но
+    ``is_configured`` ложно, и обработчик шаблона предлагает текстовый ввод.
+    """
+    # Адаптер подключается при сборке, а не при импорте bootstrap: тестам
+    # конфига и слоя handlers ``httpx`` адаптера не нужен.
+    from tldw.adapters.speech import SpeechAdapter
+
+    return SpeechAdapter.from_settings(settings)
+
+
 def build_summary_service(
     settings: Settings,
     *,
@@ -109,6 +133,7 @@ def build_application(
     summary_service: SummaryProcessor | None = None,
     template_service: TemplateService | None = None,
     template_parser: TemplateParser | None = None,
+    speech_transcriber: SpeechTranscriber | None = None,
 ) -> Application:
     """Собрать приложение из настроек, не обращаясь к сети.
 
@@ -119,6 +144,8 @@ def build_application(
         :class:`TemplateStore` в ``settings.data_dir``.
     :param template_parser: готовый разбор описания шаблона (тесты); по
         умолчанию — общий клиент LLM.
+    :param speech_transcriber: готовая замена распознавания речи (тесты);
+        по умолчанию — адаптер из ``SPEECH_*`` (может быть не настроен).
     :raises OSError: если каталог данных из конфига нельзя создать.
     """
     warn_if_open_access(settings.allowed_user_ids)
@@ -144,19 +171,26 @@ def build_application(
     templates = (
         template_service if template_service is not None else build_template_service(settings)
     )
+    speech = (
+        speech_transcriber
+        if speech_transcriber is not None
+        else build_speech_transcriber(settings)
+    )
     dispatcher.include_router(
         create_router(
             service,
             allowed_user_ids=settings.allowed_user_ids,
             template_service=templates,
             template_parser=parser,
+            speech_transcriber=speech,
         )
     )
     ensure_data_dir(settings.data_dir)
     log.debug(
-        "Приложение собрано: модель LLM %s, доступ: %s",
+        "Приложение собрано: модель LLM %s, доступ: %s, голосовой ввод: %s",
         settings.llm_model,
         describe_allowlist(settings.allowed_user_ids),
+        "включён" if speech.is_configured else "выключен",
     )
     return Application(settings=settings, bot=bot, dispatcher=dispatcher)
 
@@ -165,6 +199,7 @@ __all__ = [
     "Application",
     "build_application",
     "build_llm_client",
+    "build_speech_transcriber",
     "build_summary_service",
     "build_template_service",
 ]
