@@ -252,8 +252,14 @@ class SummaryService:
     ) -> None:
         self._video_source = video_source
         self._summarizer = summarizer
-        self._max_duration_seconds = _positive_int(max_duration_seconds, "max_duration_seconds")
-        self._max_transcript_chars = _transcript_limit(max_transcript_chars)
+        self._max_duration_seconds = _positive_int(
+            max_duration_seconds,
+            "Порог длительности видео",
+        )
+        self._max_transcript_chars = _positive_int(
+            max_transcript_chars,
+            "Лимит текста транскрипта",
+        )
         self._data_dir = None if data_dir is None else Path(data_dir)
 
     @classmethod
@@ -306,6 +312,10 @@ class SummaryService:
         if not isinstance(url, str) or not url.strip():
             raise ValueError("url должен быть непустой строкой")
 
+        # Ссылка очищается один раз: и запрос к источнику видео, и frontmatter
+        # получают одно и то же значение, иначе пробелы по краям давали бы
+        # разные `source` и URL запроса (P2 T-005).
+        clean_url = url.strip()
         snapshot = _template_snapshot(template)
         log.info(
             "Конспект: шаблон %s, разделов: %s",
@@ -313,7 +323,7 @@ class SummaryService:
             len(snapshot.sections),
         )
 
-        video = self._video_source.fetch(url)
+        video = self._video_source.fetch(clean_url)
         self._ensure_duration(video)
         material = join_transcript(video.transcript, max_chars=self._max_transcript_chars)
         if material.is_empty:
@@ -349,7 +359,7 @@ class SummaryService:
             )
             note_sections = _note_sections(snapshot.sections, summary)
 
-        note = build_note(video, summary, source=url.strip(), sections=note_sections)
+        note = build_note(video, summary, source=clean_url, sections=note_sections)
         markdown = render_note(note)
         filename = note_filename(note)
         path = save_note(self._data_dir, filename, markdown) if self._data_dir is not None else None
@@ -386,9 +396,11 @@ def join_transcript(
     """Склеить сегменты транскрипта в строки с таймкодами.
 
     Каждая строка — ``[MM:SS] текст`` или ``[HH:MM:SS] текст``; порядок
-    сегментов сохраняется. Если суммарная длина больше ``max_chars``, остаются
-    только целые сегменты, помещающиеся в лимит (кроме случая, когда даже
-    первый сегмент не влезает — тогда его текст обрезается с сохранением
+    сегментов сохраняется. Секунды округляются тем же правилом, что и
+    длительность видео в адаптере (``round``), поэтому ``15.9`` даёт
+    ``[00:16]``, а не ``[00:15]``. Если суммарная длина больше ``max_chars``,
+    остаются только целые сегменты, помещающиеся в лимит (кроме случая, когда
+    даже первый сегмент не влезает — тогда его текст обрезается с сохранением
     таймкода), а последней строкой добавляется
     :data:`TRANSCRIPT_TRUNCATION_MARKER`. Маркер входит в лимит, поэтому
     ``len(result.text) <= max_chars``.
@@ -399,9 +411,9 @@ def join_transcript(
         это мусор в промпте, а сервис отвергает пустой материал до LLM.
     :raises ValueError: если лимит не положительное целое число.
     """
-    limit = _transcript_limit(max_chars)
+    limit = _positive_int(max_chars, "Лимит текста транскрипта")
     lines = [
-        f"[{format_timecode(int(segment.start_seconds))}] {segment.text}"
+        f"[{format_timecode(round(segment.start_seconds))}] {segment.text}"
         for segment in transcript.segments
         if segment.text
     ]
@@ -555,13 +567,13 @@ def _fail_section_mismatch(reason: str) -> NoReturn:
     raise LLMError(MESSAGE_LLM_BAD_RESPONSE)
 
 
-def _transcript_limit(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("Лимит транскрипта должен быть положительным целым числом")
-    return value
-
-
 def _positive_int(value: object, name: str) -> int:
+    """Проверить положительное целое число и назвать его по-русски.
+
+    ``name`` — человекочитаемое имя лимита («Порог длительности видео»), а не
+    английское имя поля: текст ошибки не должен показывать
+    ``max_duration_seconds`` (косметика T-005, T-015).
+    """
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} должен быть положительным целым числом")
     return value
@@ -575,14 +587,22 @@ def _truncate_line(line: str, budget: int) -> str:
 
 
 def _string_items(value: object, field_name: str) -> tuple[str, ...]:
-    """Привести раздел ответа LLM к кортежу строк без разбора строки по символам."""
+    """Привести раздел ответа LLM к кортежу строк без разбора строки по символам.
+
+    Ответ LLM уже провалидирован адаптером, но сервис — последняя граница
+    перед заметкой, поэтому здесь проверяется форма: строка трактуется как
+    один элемент, а любой нестроковый элемент (в том числе ``dict``/``list``)
+    — ошибка, а не Python-repr внутри ``.md`` (P2 T-005).
+    """
     if isinstance(value, str):
         return (value,)
     try:
         items = tuple(value)  # type: ignore[arg-type]
     except TypeError:
         raise TypeError(f"{field_name} должен быть последовательностью строк") from None
-    return tuple("" if item is None else str(item) for item in items)
+    if not all(isinstance(item, str) for item in items):
+        raise TypeError(f"{field_name} должен содержать только строки")
+    return items
 
 
 __all__ = [

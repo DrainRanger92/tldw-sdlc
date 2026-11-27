@@ -56,7 +56,12 @@ from support import (
     texts,
 )
 
-from tldw.errors import MESSAGE_UNEXPECTED, REDACTED, TemplateParseError
+from tldw.errors import (
+    MESSAGE_UNEXPECTED,
+    MESSAGE_UNEXPECTED_TEMPLATE,
+    REDACTED,
+    TemplateParseError,
+)
 from tldw.handlers import (
     MESSAGE_ACCEPTED,
     MESSAGE_ACCESS_DENIED,
@@ -735,7 +740,10 @@ def test_unknown_parse_error_hides_details_and_keeps_template(
 
     stand = run_template_scenario(scenario, parser=parser, user_template=SAVED_TEMPLATE)
 
-    assert stand.texts[-1] == f"{MESSAGE_UNEXPECTED}\n\n{MESSAGE_DESCRIPTION_RETRY}"
+    assert stand.texts[-1] == (
+        f"{MESSAGE_UNEXPECTED_TEMPLATE}\n\n{MESSAGE_DESCRIPTION_RETRY}"
+    )
+    assert MESSAGE_UNEXPECTED not in stand.texts[-1], "неизвестный сбой — про шаблон"
     assert "Traceback" not in stand.texts[-1]
     for secret in (FAKE_BOT_TOKEN, FAKE_BEARER_TOKEN, FAKE_ENV_KEY, FAKE_API_KEY):
         assert secret not in caplog.text, "секрет не должен попадать в лог"

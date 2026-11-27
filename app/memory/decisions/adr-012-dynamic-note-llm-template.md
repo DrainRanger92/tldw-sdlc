@@ -117,4 +117,4 @@
 Связанные: `adr-003-note-model-manual-yaml.md`,
 `adr-005-llm-adapter-contract.md`, `adr-006-summary-service.md`,
 `adr-011-template-domain-storage.md`, `adr-013-telegram-template-flow.md`,
-`t001-t010-review-issues.md`.
+`adr-021-dynamic-note-native-format.md`, `t001-t010-review-issues.md`.

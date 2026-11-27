@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 from support import FAKE_SECRETS
 
-from tldw.adapters.speech import MAX_AUDIO_DURATION_SECONDS
-from tldw.config import ALL_ENV_VARS
+from tldw.config import ALL_ENV_VARS, MAX_AUDIO_DURATION_SECONDS
+from tldw.errors import MESSAGE_AUDIO_TOO_LONG
 from tldw.handlers import MESSAGE_ACCEPTED, MESSAGE_DONE, MESSAGE_PROCESSING
 from tldw.handlers.template import (
     BUTTON_CANCEL,
@@ -39,7 +39,6 @@ from tldw.handlers.template import (
     MESSAGE_VOICE_DOWNLOAD_FAILED,
     MESSAGE_VOICE_EMPTY,
     MESSAGE_VOICE_RETRY,
-    MESSAGE_VOICE_TOO_LONG,
     MESSAGE_VOICE_UNAVAILABLE,
     TEMPLATE_BUTTON_TEXT,
 )
@@ -183,7 +182,7 @@ def test_readme_describes_voice_input() -> None:
     assert "одной попыткой" in text, "одна попытка распознавания не описана"
     for message in (
         MESSAGE_VOICE_UNAVAILABLE,
-        MESSAGE_VOICE_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS),
+        MESSAGE_AUDIO_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS),
         MESSAGE_VOICE_DOWNLOAD_FAILED,
         MESSAGE_VOICE_EMPTY,
         MESSAGE_VOICE_RETRY,

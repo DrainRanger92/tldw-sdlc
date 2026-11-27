@@ -294,9 +294,8 @@ def test_blank_items_and_duplicate_tags_are_dropped() -> None:
         "- [00:10]"
     ]
     assert [line for line in _section_body(markdown, SECTION_QUOTES).splitlines() if line] == [
-        "> Цитата",
-        "> —",
-    ]
+        "> Цитата"
+    ], "без таймкода атрибуция не рисуется пустой строкой «> —»"
     assert _section_body(markdown, SECTION_FOLLOW_UPS).strip() == ""
 
 

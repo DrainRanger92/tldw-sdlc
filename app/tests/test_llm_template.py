@@ -383,6 +383,42 @@ def test_custom_schema_violations_raise_llm_error_without_partial_summary(
     assert "sections" in caplog.text
 
 
+def test_heading_mismatch_logs_only_index_without_template_or_llm_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Несовпадение раздела: в лог попадает индекс, а не заголовки (FR-12).
+
+    Заголовок пользовательского шаблона и заголовок из ответа LLM — ловушки:
+    ни один не должен оказаться в записи ``WARNING``.
+    """
+    template_heading = "СЕКРЕТ-ИЗ-ШАБЛОНА-777"
+    llm_heading = "СЕКРЕТ-ИЗ-ОТВЕТА-LLM-888"
+    headings = (template_heading, "Второй раздел", "Третий раздел")
+    requests, transport = recording_transport(
+        custom_content((llm_heading, "Второй раздел", "Третий раздел"))
+    )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="tldw.adapters.llm"),
+        pytest.raises(LLMResponseError),
+    ):
+        make_client(transport).summarize(TRANSCRIPT, sections=headings, tone=TONE)
+
+    assert len(requests) == 1
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "tldw.adapters.llm"
+    ]
+    assert messages, "несовпадение раздела логируется"
+    text = "\n".join(messages)
+    assert "sections[0].heading" in text, "в записи нужен индекс раздела"
+    assert template_heading not in text, "заголовок шаблона не попадает в лог"
+    assert llm_heading not in text, "текст ответа LLM не попадает в лог"
+    assert template_heading.casefold() not in text.casefold()
+    assert llm_heading.casefold() not in text.casefold()
+
+
 @pytest.mark.parametrize(
     ("content", "reason"),
     [

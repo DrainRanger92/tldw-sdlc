@@ -25,7 +25,6 @@ from .llm import (
     parse_template_patch,
 )
 from .speech import (
-    MAX_AUDIO_DURATION_SECONDS,
     SpeechAdapter,
     SpeechError,
     SpeechNotConfiguredError,
@@ -68,7 +67,6 @@ __all__ = [
     "LLMProviderError",
     "LLMResponseError",
     "LLMTimeoutError",
-    "MAX_AUDIO_DURATION_SECONDS",
     "NoTranscriptError",
     "NotYouTubeURLError",
     "SOURCE_TRANSCRIPT_API",

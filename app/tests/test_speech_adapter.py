@@ -14,8 +14,10 @@ import pytest
 from support import FAKE_API_KEY as FAKE_SUPPORT_API_KEY
 from support import FAKE_BOT_TOKEN
 
+import tldw.adapters.speech as speech_module
+from tldw import adapters as adapters_package
+from tldw import config as config_module
 from tldw.adapters import (
-    MAX_AUDIO_DURATION_SECONDS,
     SpeechAdapter,
     SpeechError,
     SpeechNotConfiguredError,
@@ -28,15 +30,19 @@ from tldw.adapters.speech import (
     ALLOWED_AUDIO_MEDIA_TYPES,
     DEFAULT_AUDIO_MEDIA_TYPE,
     MESSAGE_SPEECH_NOT_CONFIGURED,
-    MESSAGE_SPEECH_TOO_LONG,
 )
 from tldw.config import (
     DEFAULT_SPEECH_BASE_URL,
     DEFAULT_SPEECH_TIMEOUT_SECONDS,
+    MAX_AUDIO_DURATION_SECONDS,
     ConfigError,
     load_settings,
 )
-from tldw.errors import UserFacingError, describe_error
+from tldw.errors import (
+    MESSAGE_AUDIO_TOO_LONG,
+    UserFacingError,
+    describe_error,
+)
 
 FAKE_API_KEY = "test-speech-key-not-a-secret"
 MODEL = "test-whisper-model"
@@ -193,9 +199,28 @@ def test_audio_longer_than_limit_is_rejected_before_network(duration: float) -> 
         make_adapter(transport).transcribe(AUDIO, duration_seconds=duration)
 
     assert requests == [], "длительность проверяется до сетевого вызова"
-    assert str(exc_info.value) == MESSAGE_SPEECH_TOO_LONG
+    assert str(exc_info.value) == MESSAGE_AUDIO_TOO_LONG.format(
+        limit=MAX_AUDIO_DURATION_SECONDS
+    )
     assert isinstance(exc_info.value, UserFacingError)
     assert str(MAX_AUDIO_DURATION_SECONDS) in str(exc_info.value)
+
+
+def test_limit_has_single_public_import_path() -> None:
+    """Лимит 60 секунд живёт в ``tldw.config`` и не реэкспортируется (T-015)."""
+    assert "MAX_AUDIO_DURATION_SECONDS" not in adapters_package.__all__
+    assert "MAX_AUDIO_DURATION_SECONDS" not in speech_module.__all__
+    assert speech_module.MAX_AUDIO_DURATION_SECONDS is config_module.MAX_AUDIO_DURATION_SECONDS
+    assert isinstance(config_module.MAX_AUDIO_DURATION_SECONDS, int)
+
+
+def test_too_long_message_has_single_source() -> None:
+    """Второй редакции текста лимита нет: адаптер и обработчик берут один текст."""
+    assert not hasattr(speech_module, "MESSAGE_SPEECH_TOO_LONG")
+    assert "MESSAGE_AUDIO_TOO_LONG" not in speech_module.__all__
+    assert str(SpeechTooLongError()) == MESSAGE_AUDIO_TOO_LONG.format(
+        limit=MAX_AUDIO_DURATION_SECONDS
+    )
 
 
 def test_audio_exactly_at_limit_is_allowed() -> None:

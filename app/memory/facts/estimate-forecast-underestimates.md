@@ -220,3 +220,13 @@ M2/M3 (54 + 62), 5–6 и 30+ правок — M4+ (166 + 75); для новог
 32–166 шагов EXECUTE» (`estimate-m-bucket-wide.md`,
 `estimate-audit-cost-scales-with-files.md`,
 `estimate-audit-task-cost.md`).
+
+## Поправка T-015 (2026-11-27)
+
+T-015 (8 продакшн-файлов, 24 пункта аудита) — **171 EXECUTE + 44 REVIEW =
+215 шагов**, 101,8 тыс. output. M4+ по сумме попал (215 в 210–260), но
+EXECUTE 171 — у потолка ~170, а ревью 44 — ниже прежнего пола 60–80:
+проверка была статической (pytest в read-only не пошёл, 0 тестов). Для
+M4+ читать **`EXECUTE 150–175 + REVIEW 35–75`**, output 90–120 тыс.;
+ряд одиночных задач: 125, 197, 241, 116, **215**. Подробно —
+`estimate-audit-review-verification.md` и `cycle-15-spend.md`.

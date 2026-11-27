@@ -11,8 +11,10 @@
 2. если ключ или модель не заданы, :class:`SpeechNotConfiguredError` сообщает
    пользователю, что голосовой ввод недоступен, — сеть не используется;
 3. длительность голосового сообщения ограничена константой
-   :data:`MAX_AUDIO_DURATION_SECONDS` (60 секунд, FR-11); превышение даёт
-   :class:`SpeechTooLongError` до любого сетевого вызова;
+   :data:`tldw.config.MAX_AUDIO_DURATION_SECONDS` (60 секунд, FR-11); это
+   **единственный** публичный путь импорта лимита (T-015); превышение даёт
+   :class:`SpeechTooLongError` до любого сетевого вызова, а текст сообщения —
+   общий :data:`tldw.errors.MESSAGE_AUDIO_TOO_LONG`, а не вторая редакция;
 4. ровно **одна** попытка запроса: отправляется ``audio/transcriptions``
    OpenAI-совместимого API с файлом аудио и моделью; повторов нет;
 5. HTTP-ошибка, таймаут, сетевой сбой, битый ``SPEECH_BASE_URL`` и пустой
@@ -43,7 +45,7 @@ from tldw.config import (
     Settings,
     validate_http_url,
 )
-from tldw.errors import UserFacingError
+from tldw.errors import MESSAGE_AUDIO_TOO_LONG, UserFacingError
 
 log = logging.getLogger(__name__)
 
@@ -83,10 +85,6 @@ MESSAGE_SPEECH_BAD_RESPONSE: Final = (
     "Сервис распознавания речи вернул непонятный ответ. "
     "Попробуйте ещё раз или отправьте текст."
 )
-MESSAGE_SPEECH_TOO_LONG: Final = (
-    f"Голосовое сообщение длиннее {MAX_AUDIO_DURATION_SECONDS} секунд. "
-    "Отправьте сообщение короче."
-)
 
 
 class SpeechError(UserFacingError):
@@ -109,10 +107,14 @@ class SpeechNotConfiguredError(SpeechError):
 
 
 class SpeechTooLongError(SpeechError):
-    """Голосовое сообщение длиннее :data:`MAX_AUDIO_DURATION_SECONDS`."""
+    """Голосовое сообщение длиннее :data:`tldw.config.MAX_AUDIO_DURATION_SECONDS`.
 
-    def __init__(self, message: str = MESSAGE_SPEECH_TOO_LONG) -> None:
-        super().__init__(message)
+    Текст — общий с обработчиком :data:`tldw.errors.MESSAGE_AUDIO_TOO_LONG`:
+    правило «60 секунд» описано один раз, а лимит подставляется из конфига.
+    """
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or _too_long_message())
 
 
 class SpeechTimeoutError(SpeechError):
@@ -313,6 +315,11 @@ def _media_type(value: object) -> str:
     return normalized
 
 
+def _too_long_message() -> str:
+    """Сообщение о превышении лимита — из одного общего источника."""
+    return MESSAGE_AUDIO_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS)
+
+
 def _check_duration(value: object) -> float:
     """Проверить длительность аудио: конечное неотрицательное число и лимит.
 
@@ -370,11 +377,9 @@ __all__ = [
     "ALLOWED_AUDIO_MEDIA_TYPES",
     "DEFAULT_AUDIO_FILENAME",
     "DEFAULT_AUDIO_MEDIA_TYPE",
-    "MAX_AUDIO_DURATION_SECONDS",
     "MESSAGE_SPEECH_BAD_RESPONSE",
     "MESSAGE_SPEECH_NOT_CONFIGURED",
     "MESSAGE_SPEECH_TIMEOUT",
-    "MESSAGE_SPEECH_TOO_LONG",
     "MESSAGE_SPEECH_UNAVAILABLE",
     "TRANSCRIPTIONS_PATH",
     "SpeechAdapter",

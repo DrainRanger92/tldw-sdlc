@@ -270,6 +270,18 @@ def test_source_is_original_user_link(
     assert f'source: "{URL}"' in result.markdown
 
 
+def test_url_is_stripped_once_for_fetch_and_source(
+    service: SummaryService,
+    video_source: FakeVideoSource,
+) -> None:
+    """Пробелы по краям снимаются один раз: запрос и ``source`` совпадают."""
+    result = service.process(f"  {URL}  ")
+
+    assert video_source.calls == [URL], "адаптер получает очищенную ссылку"
+    assert result.note.source == URL
+    assert f'source: "{URL}"' in result.markdown
+
+
 def test_without_data_dir_returns_markdown_but_writes_nothing(
     video_source: FakeVideoSource,
     summarizer: FakeSummarizer,
@@ -385,6 +397,29 @@ def test_transcript_timecodes_are_kept_in_prompt(
         "[01:02] Минута",
         "[01:02:03] Час",
     ]
+
+
+def test_transcript_timecodes_are_rounded_like_adapter_duration(
+    service: SummaryService,
+    summarizer: FakeSummarizer,
+    video_source: FakeVideoSource,
+) -> None:
+    """Секунды округляются, а не отбрасываются: 15.9 → ``[00:16]`` (P2 T-005)."""
+    video_source.video = make_video(
+        transcript=Transcript(
+            segments=(
+                TranscriptSegment("Почти", 15.9),
+                TranscriptSegment("Минута", 61.6),
+            ),
+            language="ru",
+            source="test",
+        )
+    )
+
+    service.process(URL)
+
+    prompt, _, _ = summarizer.calls[0]
+    assert prompt.splitlines() == ["[00:16] Почти", "[01:02] Минута"]
 
 
 def test_prompt_documents_transcript_truncation() -> None:
@@ -609,6 +644,37 @@ def test_build_note_keeps_single_string_as_one_item() -> None:
 
     assert note.tldr == ("Одно предложение.",)
     assert note.key_ideas[0] == "Идея 1"
+
+
+def test_build_note_rejects_non_string_items_without_python_repr() -> None:
+    """``dict``/``list`` в разделе — ошибка, а не Python-repr в заметке (P2 T-005)."""
+    summary = VideoSummary(tldr=({"ключ": "значение"},))  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="tldr"):
+        build_note(make_video(), summary)
+
+
+def test_invalid_limit_messages_use_readable_russian_names(
+    video_source: FakeVideoSource,
+    summarizer: FakeSummarizer,
+) -> None:
+    """В русском тексте нет английского имени поля, у транскрипта есть имя."""
+    with pytest.raises(ValueError) as duration_error:
+        SummaryService(video_source, summarizer, max_duration_seconds=0)
+
+    duration_message = str(duration_error.value)
+    assert "max_duration_seconds" not in duration_message
+    assert "Порог длительности видео" in duration_message
+
+    with pytest.raises(ValueError) as transcript_error:
+        SummaryService(video_source, summarizer, max_transcript_chars=0)
+
+    transcript_message = str(transcript_error.value)
+    assert "Лимит текста транскрипта" in transcript_message
+    assert "max_transcript_chars" not in transcript_message
+
+    with pytest.raises(ValueError, match="Лимит текста транскрипта"):
+        join_transcript(Transcript(), max_chars=0)
 
 
 @pytest.mark.parametrize(

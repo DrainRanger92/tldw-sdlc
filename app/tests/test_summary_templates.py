@@ -375,6 +375,65 @@ def test_custom_template_with_builtin_heading_keeps_previous_format(
     assert "- Пункт 1 раздела Примеры кода" in section_body(result.markdown, "## Примеры кода")
 
 
+def test_dynamic_builtin_timeline_and_quotes_keep_native_format(
+    tmp_path: Path,
+) -> None:
+    """Ответ LLM → сервис → ``render_note``: «Таймкоды» и «Цитаты» без регресса.
+
+    Пункты встроенных разделов приходят от LLM строками, поэтому проверяется
+    весь путь, а не типизированный ``NoteSection``: таймкод должен получить
+    привычные скобки, а цитата без таймкода — не добавлять пустое ``> —``.
+    """
+    headings = ("TL;DR", "Таймкоды", "Цитаты")
+    content = json.dumps(
+        {
+            "sections": [
+                {
+                    "heading": "TL;DR",
+                    "items": ["Вывод один.", "Вывод два.", "Вывод три."],
+                },
+                {
+                    "heading": "Таймкоды",
+                    "items": ["01:23 — Начало", "02:05 Практика"],
+                },
+                {
+                    "heading": "Цитаты",
+                    "items": [
+                        "Учиться — значит меняться.",
+                        "Практика важнее теории.",
+                    ],
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+    requests, client = recording_client(content)
+    data_dir = tmp_path / "data"
+    service = SummaryService(FakeVideoSource(video=make_video()), client, data_dir=data_dir)
+
+    result = service.process(VIDEO_URL, template=make_template(headings, tone=""))
+
+    assert len(requests) == 1
+    timeline = section_body(result.markdown, "## Таймкоды")
+    assert "- [01:23] Начало" in timeline
+    assert "- [02:05] Практика" in timeline
+    assert "- 01:23 Начало" not in timeline, "квадратные скобки не теряются"
+
+    quotes = section_body(result.markdown, "## Цитаты")
+    assert "> Учиться — значит меняться." in quotes
+    assert "> Практика важнее теории." in quotes
+    assert "> —" not in quotes, "пустой атрибут без таймкода не нужен"
+
+    # Frontmatter и встроенный формат остальных разделов не изменились.
+    assert frontmatter(result.markdown)["source"] == VIDEO_URL
+    assert section_headings(result.markdown) == [
+        "## TL;DR",
+        "## Таймкоды",
+        "## Цитаты",
+    ]
+    assert result.path is not None and result.path.is_file()
+
+
 def test_custom_template_with_real_client_sends_sections_and_tone_once(
     tmp_path: Path,
 ) -> None:

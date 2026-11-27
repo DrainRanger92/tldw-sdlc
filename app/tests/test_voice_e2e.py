@@ -57,6 +57,7 @@ from test_template_e2e import (
 
 from tldw.adapters.speech import SpeechProviderError
 from tldw.config import MAX_AUDIO_DURATION_SECONDS, Settings, load_settings
+from tldw.errors import MESSAGE_AUDIO_TOO_LONG
 from tldw.handlers import MESSAGE_ACCESS_DENIED
 from tldw.handlers.template import (
     ACTION_EDIT,
@@ -68,7 +69,6 @@ from tldw.handlers.template import (
     MESSAGE_SAVED,
     MESSAGE_STALE_CANDIDATE,
     MESSAGE_VOICE_RETRY,
-    MESSAGE_VOICE_TOO_LONG,
     MESSAGE_VOICE_UNAVAILABLE,
 )
 from tldw.services.template import BUILTIN_SECTIONS, NoteTemplate, TemplateService
@@ -294,7 +294,9 @@ def test_voice_longer_than_limit_is_rejected_and_creates_no_note(
             await app.click(ACTION_EDIT)
             await app.send_voice(duration=61)
 
-            assert app.last_text == MESSAGE_VOICE_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS)
+            assert app.last_text == MESSAGE_AUDIO_TOO_LONG.format(
+                limit=MAX_AUDIO_DURATION_SECONDS
+            )
             assert get_file_requests(app) == [], "длинное аудио нельзя скачивать"
             assert speech.calls == []
             assert parser.calls == []

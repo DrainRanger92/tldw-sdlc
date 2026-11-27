@@ -57,7 +57,7 @@ from tldw.adapters.llm import (
 )
 from tldw.errors import (
     DEFAULT_FAILURE_CONTEXT,
-    MESSAGE_UNEXPECTED,
+    MESSAGE_UNEXPECTED_TEMPLATE,
     REDACTED,
     describe_error,
     log_failure,
@@ -383,7 +383,10 @@ def test_unknown_failure_gives_generic_message_and_cleaned_error_log(
         await stand.click(ACTION_EDIT)
         with caplog.at_level(logging.DEBUG):
             await stand.send(DESCRIPTION)
-        assert stand.last_text == f"{MESSAGE_UNEXPECTED}\n\n{MESSAGE_DESCRIPTION_RETRY}"
+        assert stand.last_text == (
+            f"{MESSAGE_UNEXPECTED_TEMPLATE}\n\n{MESSAGE_DESCRIPTION_RETRY}"
+        )
+        assert "видео" not in stand.last_text, "сбой не про видео"
         await stand.click(ACTION_SAVE)
         assert stand.last_text == MESSAGE_STALE_CANDIDATE
 

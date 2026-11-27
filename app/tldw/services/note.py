@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -78,7 +79,8 @@ class SectionKind(StrEnum):
     * ``PARAGRAPH`` — один абзац: пункты склеиваются пробелом;
     * ``BULLETS`` — маркированный список ``- пункт``;
     * ``TIMELINE`` — пункты с таймкодами ``- [MM:SS] название``;
-    * ``QUOTES`` — цитаты ``> текст`` и ``> — [таймкод]``;
+    * ``QUOTES`` — цитаты ``> текст`` и, если таймкод задан,
+      ``> — [таймкод]`` (без пустого ``> —``);
     * ``CHECKLIST`` — чеклист ``- [ ] пункт``;
     * ``CUSTOM`` — пользовательский раздел; рендерится как ``BULLETS``,
       но явно показывает, что заголовок пришёл из шаблона пользователя.
@@ -128,6 +130,12 @@ _YAML_ESCAPES: Final[dict[str, str]] = {
 }
 #: Символы, которые YAML не допускает в UTF-8 или трактует как перевод строки.
 _YAML_UNSAFE_EXTRA: Final[frozenset[str]] = frozenset({"\ufeff"})
+#: Ведущий таймкод пункта раздела «Таймкоды»: ``01:23``, ``[01:23]``,
+#: ``01:23:45`` плюс необязательный разделитель перед текстом.
+_TIMECODE_PREFIX_RE: Final = re.compile(
+    r"^\[?(?P<first>\d{1,2}):(?P<second>\d{2})(?::(?P<third>\d{2}))?\]?"
+    r"[\s—–-]*(?P<text>.*)$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +389,10 @@ def _render_quotes(quotes: tuple[Quote, ...]) -> list[str]:
             lines.append("")
         if quote.text:
             lines.append(f"> {quote.text}")
-        lines.append(f"> — [{quote.timecode}]" if quote.timecode else "> —")
+        # Пустая строка атрибуции без таймкода (``> —``) — мусор в заметке:
+        # она появляется, когда цитата пришла строкой без таймкода.
+        if quote.timecode:
+            lines.append(f"> — [{quote.timecode}]")
     return lines
 
 
@@ -524,8 +535,37 @@ def _timeline_item(item: object) -> TimelineEntry:
     if isinstance(item, TimelineEntry):
         return item
     if isinstance(item, str):
-        return TimelineEntry(timecode="", title=item)
+        timecode, title = _split_timecode(item)
+        return TimelineEntry(timecode=timecode, title=title)
     raise TypeError("пункт раздела таймкодов задаётся TimelineEntry или строкой")
+
+
+def _split_timecode(text: str) -> tuple[str, str]:
+    """Отделить ведущий таймкод строки пункта от его текста.
+
+    Динамический путь получает пункты встроенных «Таймкодов» одной строкой от
+    LLM (``01:23 — начало``), поэтому таймкод нужно разобрать, иначе рендер
+    потеряет привычные квадратные скобки. Принимаются ``MM:SS`` и
+    ``HH:MM:SS``, в том числе в скобках, с разделителем «—», «–», «-» или
+    пробелом. Строка без таймкода и неверные значения (``99:99``) остаются
+    текстом пункта: заметка не должна выдавать чужие числа за таймкод.
+    """
+    normalized = one_line(text)
+    match = _TIMECODE_PREFIX_RE.match(normalized)
+    if match is None:
+        return "", normalized
+    first = int(match.group("first"))
+    second = int(match.group("second"))
+    third = match.group("third")
+    if third is None:
+        minutes, seconds = first, second
+        timecode = format_timecode(minutes * 60 + seconds)
+    else:
+        hours, minutes, seconds = first, second, int(third)
+        timecode = format_timecode(hours * 3600 + minutes * 60 + seconds)
+    if minutes > 59 or seconds > 59:
+        return "", normalized
+    return timecode, match.group("text").strip()
 
 
 def _quote_item(item: object) -> Quote:

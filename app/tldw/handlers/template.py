@@ -61,8 +61,11 @@
 «разбора/распознавания/сохранения/сброса шаблона (происхождение, разделов: N)»,
 поэтому запись говорит о шаблоне, а не о видео, и не раскрывает описание, тон,
 аудио, распознанный текст, JSON кандидата и секреты. Известный сбой оставляет
-прежний активный шаблон и не создаёт кандидата; неизвестный даёт общее сообщение
-и ``ERROR`` со стектрейсом.
+прежний активный шаблон и не создаёт кандидата; неизвестный даёт общее
+сообщение о шаблоне (:data:`tldw.errors.MESSAGE_UNEXPECTED_TEMPLATE`, а не
+текст про видео) и ``ERROR`` со стектрейсом. Ссылка в текстовом или
+надиктованном описании отбивается одной и той же подсказкой в общем пути
+:meth:`TemplateHandler._present_description`, поэтому до LLM она не доходит.
 
 Заголовки и тон — пользовательские данные, а не разметка: все сообщения и
 правки сценария уходят с ``parse_mode=None``, поэтому заголовок с ``<``, ``>``
@@ -94,7 +97,7 @@ from aiogram.types import (
 
 from tldw.access import AccessPolicy
 from tldw.config import MAX_AUDIO_DURATION_SECONDS
-from tldw.errors import log_failure
+from tldw.errors import MESSAGE_AUDIO_TOO_LONG, MESSAGE_UNEXPECTED_TEMPLATE, log_failure
 from tldw.handlers.link import MESSAGE_ACCESS_DENIED, extract_first_url
 from tldw.services.template import (
     MAX_DESCRIPTION_LENGTH,
@@ -165,10 +168,6 @@ MESSAGE_VOICE_NOT_EXPECTED: Final = (
 MESSAGE_VOICE_UNAVAILABLE: Final = (
     "Голосовой ввод недоступен: распознавание речи не настроено. "
     "Пришлите описание текстом — сценарий шаблона работает как обычно."
-)
-MESSAGE_VOICE_TOO_LONG: Final = (
-    "Голосовое сообщение длиннее {limit} секунд. "
-    "Запишите описание короче или отправьте его текстом."
 )
 MESSAGE_VOICE_DOWNLOAD_FAILED: Final = (
     "Не удалось получить голосовое сообщение. "
@@ -431,10 +430,7 @@ class TemplateHandler:
         router.message.register(self.handle_open, F.text == TEMPLATE_BUTTON_TEXT)
         router.message.register(
             self.handle_description,
-            StateFilter(
-                TemplateStates.waiting_description,
-                TemplateStates.confirming_candidate,
-            ),
+            StateFilter(*_DESCRIPTION_STATES),
             F.text,
         )
         router.message.register(self.handle_voice, F.voice)
@@ -484,9 +480,10 @@ class TemplateHandler:
 
         Сообщение со ссылкой не запускает обработку видео ни в ожидании
         описания, ни при показанном кандидате: пользователь получает просьбу
-        закончить/отменить описание или разобраться с кандидатом. Дальше текст
-        идёт общим с голосом путём :meth:`_present_description`: лимиты,
-        разбор в рабочем потоке, показ кандидата и обработка ошибок.
+        закончить/отменить описание или разобраться с кандидатом. Проверка
+        ссылки живёт в общем с голосом пути :meth:`_present_description`
+        (лимиты, разбор в рабочем потоке, показ кандидата, обработка ошибок),
+        поэтому текст и надиктованное описание ведут себя одинаково.
         """
         user_id = _sender_id(message)
         if user_id is None or not self._access.is_allowed(user_id):
@@ -494,17 +491,12 @@ class TemplateHandler:
             await message.answer(MESSAGE_ACCESS_DENIED, parse_mode=None)
             return
 
-        current_state = await state.get_state()
-        text = (message.text or "").strip()
-        if extract_first_url(text) is not None:
-            await message.answer(
-                MESSAGE_LINK_WHILE_DESCRIPTION
-                if current_state == TemplateStates.waiting_description.state
-                else MESSAGE_LINK_WHILE_CANDIDATE,
-                parse_mode=None,
-            )
-            return
-        await self._present_description(message, state, user_id, text)
+        await self._present_description(
+            message,
+            state,
+            user_id,
+            (message.text or "").strip(),
+        )
 
     async def handle_voice(self, message: Message, state: FSMContext) -> None:
         """Принять голосовое описание: проверить, скачать, распознать, показать.
@@ -521,7 +513,9 @@ class TemplateHandler:
            сверяется с :data:`tldw.config.MAX_AUDIO_DURATION_SECONDS`;
         5. скачивание — в память (``BytesIO``), без записи в ``DATA_DIR``;
         6. распознавание — одна попытка через :func:`asyncio.to_thread`;
-        7. дальше общий путь «разбор → показ кандидата → подтверждение».
+        7. дальше общий путь «ссылка → разбор → показ кандидата →
+           подтверждение»: надиктованная ссылка отбивается той же подсказкой,
+           что и текстовая, и LLM не вызывается.
 
         Ошибка скачивания или распознавания не меняет активный шаблон: при
         сбое распознавания кандидат и состояние сбрасываются, и пользователь
@@ -564,7 +558,7 @@ class TemplateHandler:
                 MAX_AUDIO_DURATION_SECONDS,
             )
             await message.answer(
-                MESSAGE_VOICE_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS),
+                MESSAGE_AUDIO_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS),
                 reply_markup=cancel_keyboard(),
                 parse_mode=None,
             )
@@ -579,6 +573,7 @@ class TemplateHandler:
                 exc,
                 logger=log,
                 context=self._failure_context("скачивания голосового", user_id),
+                unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await message.answer(
                 MESSAGE_VOICE_DOWNLOAD_FAILED,
@@ -598,6 +593,7 @@ class TemplateHandler:
                 exc,
                 logger=log,
                 context=self._failure_context("распознавания", user_id),
+                unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await message.answer(
                 f"{report.user_message}\n\n{MESSAGE_VOICE_RETRY}",
@@ -624,12 +620,24 @@ class TemplateHandler:
         user_id: int,
         text: str,
     ) -> None:
-        """Общий путь описания: лимиты, разбор в потоке и показ кандидата.
+        """Общий путь описания: ссылка, лимиты, разбор и показ кандидата.
 
         Текст приходит из сообщения или из распознавания речи — дальше разницы
-        нет: проверяются те же лимиты, кандидат показывается теми же кнопками,
-        а ошибка разбора оставляет прежний активный шаблон.
+        нет: сначала проверяется ссылка (её нельзя отправлять в LLM как
+        описание), затем те же лимиты, показ кандидата теми же кнопками, а
+        ошибка разбора оставляет прежний активный шаблон. Проверка ссылки
+        стоит здесь, а не в ``handle_description``, чтобы голосовой и текстовый
+        вводы были симметричны (P3 T-012, T-015).
         """
+        current_state = await state.get_state()
+        if extract_first_url(text) is not None:
+            await message.answer(
+                MESSAGE_LINK_WHILE_DESCRIPTION
+                if current_state == TemplateStates.waiting_description.state
+                else MESSAGE_LINK_WHILE_CANDIDATE,
+                parse_mode=None,
+            )
+            return
         if len(text) < MIN_DESCRIPTION_LENGTH:
             await message.answer(
                 MESSAGE_DESCRIPTION_EMPTY,
@@ -661,6 +669,7 @@ class TemplateHandler:
                 exc,
                 logger=log,
                 context=self._failure_context("разбора", user_id),
+                unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await message.answer(
                 f"{report.user_message}\n\n{MESSAGE_DESCRIPTION_RETRY}",
@@ -852,6 +861,7 @@ class TemplateHandler:
                 exc,
                 logger=log,
                 context=self._failure_context("сброса", user_id),
+                unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await state.clear()
             await self._show(callback, report.user_message, empty_keyboard())
@@ -887,6 +897,7 @@ class TemplateHandler:
                 exc,
                 logger=log,
                 context=self._failure_context("сохранения", user_id),
+                unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await self._show(callback, report.user_message, candidate_keyboard())
             return
@@ -1038,7 +1049,6 @@ __all__ = [
     "MESSAGE_VOICE_EMPTY",
     "MESSAGE_VOICE_NOT_EXPECTED",
     "MESSAGE_VOICE_RETRY",
-    "MESSAGE_VOICE_TOO_LONG",
     "MESSAGE_VOICE_UNAVAILABLE",
     "TEMPLATE_BUTTON_TEXT",
     "SpeechTranscriber",

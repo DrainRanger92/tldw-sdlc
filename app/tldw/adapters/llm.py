@@ -1009,13 +1009,18 @@ def _check_section_heading(value: object, expected: str, index: int) -> None:
 
     В промпте угловые скобки заголовка обезврежены (:func:`_data_text`),
     поэтому принимаются оба написания: исходное и обезвреженное.
+
+    Причина несовпадения не содержит ни ожидаемого заголовка из шаблона
+    пользователя, ни полученного от LLM: в лог попадает только индекс
+    раздела (FR-12, T-015). Этого достаточно, чтобы найти ответ модели, а
+    текст шаблона и ответа остаётся вне лога.
     """
     if not isinstance(value, str):
         _fail(f"sections[{index}].heading должно быть строкой")
     actual = one_line(value).casefold()
     accepted = {expected.casefold(), _data_text(expected).casefold()}
     if actual not in accepted:
-        _fail(f"sections[{index}].heading: ожидается {expected!r}, получено {actual!r}")
+        _fail(f"sections[{index}].heading не совпал с шаблоном")
 
 
 def _dynamic_items(value: object, heading: str, index: int) -> tuple[str, ...]:

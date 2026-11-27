@@ -36,9 +36,12 @@ from tldw.adapters.youtube import (
     VideoUnavailableError,
     YouTubeNetworkError,
 )
+from tldw.config import MAX_AUDIO_DURATION_SECONDS
 from tldw.errors import (
     MAX_LOG_FIELD_CHARS,
+    MESSAGE_AUDIO_TOO_LONG,
     MESSAGE_UNEXPECTED,
+    MESSAGE_UNEXPECTED_TEMPLATE,
     REDACTED,
     UserFacingError,
     describe_error,
@@ -124,6 +127,36 @@ def test_unknown_error_gets_generic_message_and_error_with_traceback() -> None:
     assert report.traceback_text is not None
     assert "Traceback (most recent call last)" in report.traceback_text
     assert "RuntimeError: boom" in report.traceback_text
+
+
+def test_unknown_error_can_use_a_context_specific_message() -> None:
+    """Сценарий шаблона передаёт свой текст для неизвестного сбоя (T-015)."""
+    error = raised(RuntimeError("boom"))
+
+    report = describe_error(error, unknown_message=MESSAGE_UNEXPECTED_TEMPLATE)
+
+    assert report.user_message == MESSAGE_UNEXPECTED_TEMPLATE
+    assert "видео" not in report.user_message
+    assert report.level == logging.ERROR
+    assert report.traceback_text is not None
+
+
+def test_known_error_ignores_context_specific_unknown_message() -> None:
+    """Переопределённый текст не подменяет сообщение известной ошибки."""
+    report = describe_error(
+        NotYouTubeURLError(),
+        unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
+    )
+
+    assert report.user_message == MESSAGE_NOT_YOUTUBE
+
+
+def test_audio_limit_message_is_shared_and_formatted() -> None:
+    """Единственный текст лимита 60 секунд подставляется из конфига."""
+    message = MESSAGE_AUDIO_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS)
+
+    assert "60 секунд" in message
+    assert "Запишите описание короче" in message
 
 
 def test_reason_names_exception_type_and_message() -> None:

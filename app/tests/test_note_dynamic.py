@@ -525,12 +525,48 @@ def test_section_items_accept_entries_and_strings() -> None:
 
     assert timeline.items == (
         TimelineEntry("00:10", "Начало"),
-        TimelineEntry("", "01:15 Пара"),
+        TimelineEntry("01:15", "Пара"),
     )
     assert quotes.items == (Quote("Цитата", "00:05"), Quote("без таймкода"))
     markdown = render_note(_legacy_note(sections=(timeline,)))
     assert "- [00:10] Начало" in markdown
-    assert "- 01:15 Пара" in markdown
+    assert "- [01:15] Пара" in markdown
+    assert "- 01:15 Пара" not in markdown
+
+
+@pytest.mark.parametrize(
+    ("item", "timecode", "title"),
+    [
+        ("01:15 Пара", "01:15", "Пара"),
+        ("[01:15] Пара", "01:15", "Пара"),
+        ("01:15 — Пара", "01:15", "Пара"),
+        ("01:15 – Пара", "01:15", "Пара"),
+        ("1:02:03 Час", "01:02:03", "Час"),
+        ("99:99 неверный", "", "99:99 неверный"),
+        ("Без таймкода", "", "Без таймкода"),
+    ],
+)
+def test_timeline_string_items_split_leading_timecode(
+    item: str,
+    timecode: str,
+    title: str,
+) -> None:
+    """Строка пункта «Таймкодов» сохраняет привычный формат таймкода."""
+    section = NoteSection("Таймкоды", items=(item,))
+
+    assert section.items == (TimelineEntry(timecode, title),)
+    body = _section_body(render_note(_legacy_note(sections=(section,))), "## Таймкоды")
+    expected = f"- [{timecode}] {title}" if timecode else f"- {title}"
+    assert expected in body
+
+
+def test_quotes_without_timecode_have_no_empty_attribution() -> None:
+    """Цитата без таймкода рендерится без пустого ``> —`` (динамический путь)."""
+    section = NoteSection("Цитаты", items=("Учиться — значит меняться.",))
+    body = _section_body(render_note(_legacy_note(sections=(section,))), "## Цитаты")
+
+    assert body.strip() == "> Учиться — значит меняться."
+    assert "> —" not in body
 
 
 def test_section_items_are_collapsed_to_one_line() -> None:

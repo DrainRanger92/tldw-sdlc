@@ -31,6 +31,7 @@ import pytest
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.methods import GetFile
 from support import (
+    VIDEO_URL,
     FakeSession,
     FakeSpeechTranscriber,
     FakeSummarizer,
@@ -47,8 +48,10 @@ from support import (
     texts,
 )
 
-from tldw.adapters.speech import SpeechProviderError
+import tldw.handlers.template as handler_module
+from tldw.adapters.speech import SpeechProviderError, SpeechTooLongError
 from tldw.config import MAX_AUDIO_DURATION_SECONDS
+from tldw.errors import MESSAGE_AUDIO_TOO_LONG, MESSAGE_UNEXPECTED, MESSAGE_UNEXPECTED_TEMPLATE
 from tldw.handlers import MESSAGE_ACCESS_DENIED
 from tldw.handlers.template import (
     ACTION_CANCEL,
@@ -62,6 +65,8 @@ from tldw.handlers.template import (
     MESSAGE_CANDIDATE_TITLE,
     MESSAGE_CLOSED,
     MESSAGE_DESCRIPTION_TOO_LONG,
+    MESSAGE_LINK_WHILE_CANDIDATE,
+    MESSAGE_LINK_WHILE_DESCRIPTION,
     MESSAGE_PARSING,
     MESSAGE_SAVED,
     MESSAGE_STALE_CANDIDATE,
@@ -69,7 +74,6 @@ from tldw.handlers.template import (
     MESSAGE_VOICE_EMPTY,
     MESSAGE_VOICE_NOT_EXPECTED,
     MESSAGE_VOICE_RETRY,
-    MESSAGE_VOICE_TOO_LONG,
     MESSAGE_VOICE_UNAVAILABLE,
     TemplateHandler,
     TemplateStates,
@@ -264,7 +268,9 @@ def test_voice_longer_than_limit_is_rejected_before_download() -> None:
         await stand.click(ACTION_EDIT)
         await stand.send_voice(duration=61)
 
-        assert stand.last_text == MESSAGE_VOICE_TOO_LONG.format(limit=MAX_AUDIO_DURATION_SECONDS)
+        assert stand.last_text == MESSAGE_AUDIO_TOO_LONG.format(
+            limit=MAX_AUDIO_DURATION_SECONDS
+        )
         assert get_file_requests(stand) == [], "длинное аудио нельзя скачивать"
         assert speech.calls == []
         assert parser.calls == []
@@ -305,6 +311,37 @@ def test_unconfigured_adapter_offers_text_input() -> None:
     stand = run_template_scenario(scenario, speech=speech, audio=AUDIO)
 
     assert stand.saves == [(42, (("Коротко", "Примеры кода"), "короче"))]
+
+
+def test_unconfigured_adapter_with_long_voice_logs_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Выключенный адаптер: «доступен текст» даже для 61 с и без WARNING.
+
+    Двойной ``WARNING`` (адаптер + обработчик) не воспроизводится: адаптер не
+    вызывается, поэтому его проверка длительности недостижима — пункт T-012
+    закрыт как устаревший (T-015).
+    """
+    speech = FakeSpeechTranscriber(text=VOICE_TEXT, configured=False)
+
+    async def scenario(stand: TemplateStand) -> None:
+        await stand.send("/template")
+        await stand.click(ACTION_EDIT)
+        with caplog.at_level(logging.WARNING):
+            await stand.send_voice(duration=MAX_AUDIO_DURATION_SECONDS + 1)
+
+        assert stand.last_text == MESSAGE_VOICE_UNAVAILABLE
+        assert get_file_requests(stand) == []
+        assert speech.calls == [], "адаптер не вызывается вовсе"
+
+    run_template_scenario(scenario, speech=speech, audio=AUDIO)
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.name.startswith("tldw.")
+    ]
+    assert warnings == [], f"неожиданные предупреждения: {warnings}"
 
 
 def test_absent_adapter_offers_text_input_without_network() -> None:
@@ -356,6 +393,70 @@ def test_stranger_voice_is_denied_before_download_and_recognition() -> None:
     assert stand.saves == []
 
 
+def test_voice_link_gets_same_hint_as_text_and_skips_llm() -> None:
+    """Ссылка в надиктованном описании отбивается той же подсказкой, что текст.
+
+    Симметрия T-015: распознанный текст проходит общий
+    ``_present_description``, поэтому ссылка не уходит в разбор LLM и не
+    запускает обработку видео.
+    """
+    speech = FakeSpeechTranscriber(text=f"Сделай шаблон по видео {VIDEO_URL}")
+    parser = FakeTemplateParser(sections=("Коротко",), tone=None)
+
+    async def scenario(stand: TemplateStand) -> None:
+        await stand.send("/template")
+        await stand.click(ACTION_EDIT)
+        await stand.send_voice(duration=10)
+
+        assert stand.last_text == MESSAGE_LINK_WHILE_DESCRIPTION
+        assert stand.parser.calls == [], "ссылка не уходит в LLM как описание"
+        assert stand.source.calls == []
+        assert stand.summarizer.calls == []
+        assert stand.saves == []
+
+        # Состояние ожидания сохранено: описание всё ещё можно прислать.
+        await stand.send("Разделы: Коротко")
+        assert "1. Коротко" in stand.last_text
+
+    stand = run_template_scenario(scenario, speech=speech, parser=parser, audio=AUDIO)
+
+    assert len(stand.parser.calls) == 1
+    assert stand.saves == []
+
+
+def test_voice_link_while_showing_candidate_keeps_candidate_hint() -> None:
+    """Надиктованная ссылка при показанном кандидате даёт подсказку про кандидата."""
+    speech = FakeSpeechTranscriber(text=f"А теперь {VIDEO_URL}")
+
+    async def scenario(stand: TemplateStand) -> None:
+        await stand.send("/template")
+        await stand.click(ACTION_EDIT)
+        await stand.send("Разделы: Коротко, Итоги")
+        assert MESSAGE_CANDIDATE_TITLE in stand.last_text
+        await stand.send_voice(duration=10)
+
+        assert stand.last_text == MESSAGE_LINK_WHILE_CANDIDATE
+        assert stand.source.calls == []
+        assert stand.summarizer.calls == []
+
+        # Кандидат не потерян: его всё ещё можно сохранить.
+        await stand.click(ACTION_SAVE)
+
+    stand = run_template_scenario(scenario, speech=speech, audio=AUDIO)
+
+    assert stand.saves == [(42, (("Коротко", "Примеры кода"), "короче"))]
+
+
+def test_voice_limit_text_and_handler_have_one_source() -> None:
+    """Текст лимита один: адаптер и обработчик не держат двух редакций."""
+    assert not hasattr(handler_module, "MESSAGE_VOICE_TOO_LONG")
+    assert "MESSAGE_AUDIO_TOO_LONG" not in handler_module.__all__
+    assert str(SpeechTooLongError()) == MESSAGE_AUDIO_TOO_LONG.format(
+        limit=MAX_AUDIO_DURATION_SECONDS
+    )
+    assert handler_module.MAX_AUDIO_DURATION_SECONDS is MAX_AUDIO_DURATION_SECONDS
+
+
 def test_voice_outside_description_state_gets_a_hint() -> None:
     """Голос вне шага изменения не скачивается, а подсказывает, куда идти."""
     speech = FakeSpeechTranscriber(text=VOICE_TEXT)
@@ -372,6 +473,34 @@ def test_voice_outside_description_state_gets_a_hint() -> None:
 
 
 # --- Ошибки распознавания и скачивания ---------------------------------------
+
+
+def test_unknown_voice_failure_gives_template_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Неизвестный сбой голосового пути говорит о шаблоне, а не о видео."""
+    speech = FakeSpeechTranscriber(error=RuntimeError("boom"))
+
+    async def scenario(stand: TemplateStand) -> None:
+        await stand.send("/template")
+        await stand.click(ACTION_EDIT)
+        with caplog.at_level(logging.ERROR):
+            await stand.send_voice(duration=10)
+
+        answer = stand.last_text
+        assert MESSAGE_UNEXPECTED_TEMPLATE in answer
+        assert MESSAGE_VOICE_RETRY in answer
+        assert MESSAGE_UNEXPECTED not in answer
+        assert "видео" not in answer
+
+    run_template_scenario(scenario, speech=speech, audio=AUDIO)
+
+    errors = [
+        record
+        for record in caplog.records
+        if record.name == "tldw.handlers.template" and record.levelno == logging.ERROR
+    ]
+    assert errors, "неизвестный сбой логируется на уровне ERROR"
 
 
 def test_recognition_error_keeps_previous_template_and_returns_to_input() -> None:

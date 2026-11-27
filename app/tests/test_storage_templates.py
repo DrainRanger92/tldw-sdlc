@@ -46,6 +46,18 @@ def storage_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord
     ]
 
 
+def storage_records(
+    caplog: pytest.LogCaptureFixture,
+    level: int,
+) -> list[logging.LogRecord]:
+    """Записи нашего модуля ровно заданного уровня."""
+    return [
+        record
+        for record in caplog.records
+        if record.name == TEMPLATE_LOGGER and record.levelno == level
+    ]
+
+
 def write_raw_template(data_dir: Path, raw: str, user_id: int = USER_ID) -> Path:
     """Положить произвольное содержимое в файл шаблона."""
     path = template_path(data_dir, user_id)
@@ -172,19 +184,39 @@ def test_save_rejects_invalid_record(tmp_path: Path, record: object) -> None:
 # --- Устойчивое чтение ------------------------------------------------------
 
 
-def test_load_missing_template_warns_and_returns_none(
+def test_load_missing_template_logs_debug_and_returns_none(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Отсутствие своего шаблона — штатное состояние: DEBUG, а не WARNING."""
     store = TemplateStore(tmp_path)
 
-    with caplog.at_level(logging.WARNING, logger=TEMPLATE_LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=TEMPLATE_LOGGER):
         assert store.load(USER_ID) is None
 
-    warnings = storage_warnings(caplog)
-    assert len(warnings) == 1
-    assert warnings[0].levelno == logging.WARNING
+    assert storage_warnings(caplog) == [], "нет шаблона — не повод для WARNING"
+    records = storage_records(caplog, logging.DEBUG)
+    assert len(records) == 1
+    assert "не сохранён" in records[0].getMessage()
     assert not store.templates_dir.exists()
+
+
+def test_missing_file_and_broken_json_use_different_log_levels(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Два пути чтения различаются: нет файла — DEBUG, битый файл — WARNING."""
+    store = TemplateStore(tmp_path)
+
+    with caplog.at_level(logging.DEBUG, logger=TEMPLATE_LOGGER):
+        assert store.load(USER_ID) is None
+        write_raw_template(tmp_path, '{"version": 1, "sections": ["TL;DR"]')
+        assert store.load(USER_ID) is None
+
+    levels = [
+        record.levelno for record in caplog.records if record.name == TEMPLATE_LOGGER
+    ]
+    assert levels == [logging.DEBUG, logging.WARNING]
 
 
 def test_load_broken_json_warns_returns_none_and_keeps_file(

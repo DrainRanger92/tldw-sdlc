@@ -24,7 +24,13 @@
 - здесь же живут нейтральные ошибки шаблона заметки
   (:class:`TemplateParseError`, :class:`TemplateValidationError`): их
   поднимает и домен шаблона, и LLM-адаптер, который по ADR-002 не импортирует
-  ``services``.
+  ``services``;
+- общее сообщение неизвестного сбоя можно переопределить
+  (:data:`MESSAGE_UNEXPECTED_TEMPLATE`): сценарий шаблона говорит о шаблоне,
+  а не о видео, и передаёт свой текст в ``unknown_message``;
+- пользовательский текст лимита голосового сообщения
+  (:data:`MESSAGE_AUDIO_TOO_LONG`) живёт здесь же — это общий ресурс
+  обработчика и адаптера речи, а не константа слоя.
 
 Почему стектрейс форматируется вручную, а не через ``log.exception``:
 стандартный ``exc_info`` обошёл бы очистку, а сообщение исключения или URL
@@ -44,6 +50,15 @@ log = logging.getLogger(__name__)
 
 #: Общее сообщение для неизвестного сбоя: без деталей и стектрейса.
 MESSAGE_UNEXPECTED: Final = "Не удалось обработать видео. Попробуйте позже."
+#: То же для сценария шаблона: сбой не про видео, а про шаблон (T-015).
+MESSAGE_UNEXPECTED_TEMPLATE: Final = "Не удалось обработать шаблон. Попробуйте позже."
+#: Единственный текст лимита голосового сообщения (FR-11): его используют и
+#: обработчик (проверка до скачивания), и адаптер речи (защита внутри).
+#: ``{limit}`` подставляется из :data:`tldw.config.MAX_AUDIO_DURATION_SECONDS`.
+MESSAGE_AUDIO_TOO_LONG: Final = (
+    "Голосовое сообщение длиннее {limit} секунд. "
+    "Запишите описание короче или отправьте его текстом."
+)
 #: Чем заменяются секреты в логе.
 REDACTED: Final = "[скрыто]"
 #: Контекст сбоя по умолчанию: прежний текст записи для старых вызовов.
@@ -142,7 +157,12 @@ class ErrorReport:
     context: str = DEFAULT_FAILURE_CONTEXT
 
 
-def describe_error(exc: BaseException, *, context: str | None = None) -> ErrorReport:
+def describe_error(
+    exc: BaseException,
+    *,
+    context: str | None = None,
+    unknown_message: str = MESSAGE_UNEXPECTED,
+) -> ErrorReport:
     """Свести исключение к ответу пользователю и безопасной записи в лог.
 
     Известные ошибки (:class:`UserFacingError`) отдают своё сообщение и
@@ -152,6 +172,10 @@ def describe_error(exc: BaseException, *, context: str | None = None) -> ErrorRe
     :param context: необязательная пометка, о чём сбой («разбора шаблона»).
         ``None`` и пустая строка дают прежнее «обработки видео», поэтому старые
         вызовы и тексты не меняются. Пометка очищается как любой текст лога.
+    :param unknown_message: текст ответа для **неизвестного** сбоя. По
+        умолчанию :data:`MESSAGE_UNEXPECTED` (про видео); сценарий шаблона
+        передаёт :data:`MESSAGE_UNEXPECTED_TEMPLATE`. Известные ошибки
+        по-прежнему отдают своё сообщение.
     """
     reason = format_reason(exc)
     failure_context = format_context(context)
@@ -163,7 +187,7 @@ def describe_error(exc: BaseException, *, context: str | None = None) -> ErrorRe
             context=failure_context,
         )
     return ErrorReport(
-        user_message=MESSAGE_UNEXPECTED,
+        user_message=unknown_message,
         reason=reason,
         level=logging.ERROR,
         traceback_text=format_traceback(exc),
@@ -176,6 +200,7 @@ def log_failure(
     *,
     logger: logging.Logger | None = None,
     context: str | None = None,
+    unknown_message: str = MESSAGE_UNEXPECTED,
 ) -> ErrorReport:
     """Записать сбой в лог и вернуть разбор для ответа пользователю.
 
@@ -186,8 +211,11 @@ def log_failure(
     :param logger: логгер вызывающего слоя; по умолчанию — ``tldw.errors``.
     :param context: о чём сбой; ``None`` сохраняет прежнее «Сбой обработки
         видео», сценарий шаблона передаёт «разбора шаблона (…, разделов: 2)».
+    :param unknown_message: текст ответа для неизвестного сбоя; ``None`` не
+        принимается, поэтому общий текст всегда осознан (см.
+        :func:`describe_error`).
     """
-    report = describe_error(exc, context=context)
+    report = describe_error(exc, context=context, unknown_message=unknown_message)
     target = log if logger is None else logger
     if report.traceback_text is None:
         target.log(report.level, "Сбой %s: %s", report.context, report.reason)
@@ -325,7 +353,9 @@ __all__ = [
     "MAX_TRACEBACK_CHARS",
     "MAX_TRACEBACK_LINE_CHARS",
     "MAX_USER_MESSAGE_CHARS",
+    "MESSAGE_AUDIO_TOO_LONG",
     "MESSAGE_UNEXPECTED",
+    "MESSAGE_UNEXPECTED_TEMPLATE",
     "REDACTED",
     "TemplateParseError",
     "TemplateValidationError",
