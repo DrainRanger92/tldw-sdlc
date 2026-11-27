@@ -11,7 +11,9 @@
    max_video_duration_seconds``, по умолчанию 2 часа) и при превышении
    поднимает :class:`VideoTooLongError` — **до** вызова LLM и **до** записи
    файла, поэтому частичной заметки не остаётся;
-3. склеивает транскрипт с таймкодами (:func:`join_transcript`);
+3. склеивает транскрипт с таймкодами (:func:`join_transcript`); пустой или
+   вырожденный материал отвергается :class:`EmptyTranscriptError` до LLM —
+   конспект по одним метаданным пользователю не нужен;
 4. вызывает LLM, собирает :class:`~tldw.services.note.Note` из метаданных
    видео и ответа (:func:`build_note`);
 5. рендерит ``.md`` по шаблону T-002 и при заданном ``data_dir`` атомарно
@@ -98,6 +100,10 @@ TRANSCRIPT_TRUNCATION_MARKER: Final = "[транскрипт усечён: {used
 MESSAGE_VIDEO_TOO_LONG: Final = (
     "Видео слишком длинное: {duration} при допустимом максимуме {limit}."
 )
+#: Транскрипт пуст: ни одного непустого сегмента, конспектировать нечего.
+MESSAGE_EMPTY_TRANSCRIPT: Final = (
+    "У этого видео нет субтитров, поэтому конспект сделать не получится."
+)
 #: Подписи происхождения шаблона для лога (FR-12): без текста шаблона и тона.
 TEMPLATE_ORIGIN_LABELS: Final[Mapping[TemplateOrigin, str]] = {
     TemplateOrigin.BUILTIN: "встроенный",
@@ -123,6 +129,20 @@ class VideoTooLongError(UserFacingError):
                 limit=format_timecode(max_duration_seconds),
             )
         )
+
+
+class EmptyTranscriptError(UserFacingError):
+    """В транскрипте нет ни одного непустого сегмента; LLM не вызывается.
+
+    Защита живёт в сервисе, а не только в YouTube-адаптере: через
+    ``YouTubeAdapter`` пустой транскрипт даёт ``NoTranscriptError``, но любой
+    другой источник или вырожденный лимит усечения могут вернуть пустой текст.
+    Сообщение совместимо по смыслу с «нет субтитров», поэтому пользователь
+    видит понятный текст, а не общий сбой.
+    """
+
+    def __init__(self, message: str = MESSAGE_EMPTY_TRANSCRIPT) -> None:
+        super().__init__(message)
 
 
 class VideoSource(Protocol):
@@ -274,6 +294,8 @@ class SummaryService:
             заметку, ни файл.
         :raises VideoTooLongError: видео длиннее порога из конфига; ни LLM,
             ни файл не вызываются.
+        :raises EmptyTranscriptError: транскрипт пуст (или вырожденный лимит
+            усечения не оставил текста); LLM и запись файла не вызываются.
         :raises tldw.adapters.youtube.YouTubeAdapterError: не YouTube, нет
             субтитров, видео недоступно или сетевая ошибка.
         :raises tldw.adapters.llm.LLMError: LLM не ответил, ответ неполный или
@@ -294,6 +316,12 @@ class SummaryService:
         video = self._video_source.fetch(url)
         self._ensure_duration(video)
         material = join_transcript(video.transcript, max_chars=self._max_transcript_chars)
+        if material.is_empty:
+            # Пустой или вырожденный (лимит меньше маркера) транскрипт не уходит
+            # в промпт: LLM ответил бы по одним метаданным, а пользователь ждёт
+            # конспект по субтитрам. Ни LLM, ни файл не вызываются.
+            log.warning("Конспект: пустой транскрипт — LLM не вызывается")
+            raise EmptyTranscriptError()
         if material.truncated:
             log.warning(
                 "Конспект: транскрипт усечён до %s из %s сегментов (лимит %s символов)",
@@ -366,9 +394,9 @@ def join_transcript(
     ``len(result.text) <= max_chars``.
 
     :param max_chars: жёсткий лимит длины материала в символах (положительное
-        целое число). Если лимит меньше самого маркера усечения, в материал
-        попадает только обрезанный маркер — это вырожденный, но не падающий
-        случай.
+        целое число). Если лимита не хватает на маркер усечения и хотя бы один
+        сегмент, возвращается пустой текст (``is_empty``): обрезанный маркер —
+        это мусор в промпте, а сервис отвергает пустой материал до LLM.
     :raises ValueError: если лимит не положительное целое число.
     """
     limit = _transcript_limit(max_chars)
@@ -392,9 +420,12 @@ def join_transcript(
 
     # Резервируем место под маркер с максимальным числом цифр (used == total).
     reserved_marker = TRANSCRIPT_TRUNCATION_MARKER.format(used=total, total=total)
-    if len(reserved_marker) + 1 > limit:
+    if len(reserved_marker) + 1 >= limit:
+        # Лимит меньше маркера или равен «маркер + 1» (budget == 0): места под
+        # целый сегмент нет. Пустой текст не даёт обрезанному маркеру и пустой
+        # строке (used_segments=1) уйти в промпт.
         return TranscriptText(
-            text=reserved_marker[:limit],
+            text="",
             truncated=True,
             used_segments=0,
             total_segments=total,
@@ -556,6 +587,8 @@ def _string_items(value: object, field_name: str) -> tuple[str, ...]:
 
 __all__ = [
     "DEFAULT_MAX_TRANSCRIPT_CHARS",
+    "EmptyTranscriptError",
+    "MESSAGE_EMPTY_TRANSCRIPT",
     "MESSAGE_VIDEO_TOO_LONG",
     "SummaryProvider",
     "SummaryResult",

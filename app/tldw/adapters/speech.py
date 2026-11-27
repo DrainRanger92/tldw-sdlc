@@ -15,8 +15,8 @@
    :class:`SpeechTooLongError` до любого сетевого вызова;
 4. ровно **одна** попытка запроса: отправляется ``audio/transcriptions``
    OpenAI-совместимого API с файлом аудио и моделью; повторов нет;
-5. HTTP-ошибка, таймаут, сетевой сбой и пустой ответ превращаются в
-   типизированные :class:`SpeechError` — наследники
+5. HTTP-ошибка, таймаут, сетевой сбой, битый ``SPEECH_BASE_URL`` и пустой
+   ответ превращаются в типизированные :class:`SpeechError` — наследники
    :class:`tldw.errors.UserFacingError`, поэтому их сообщение безопасно
    показывать пользователю;
 6. аудио и полный текст распознавания в лог не попадают: пишутся только
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import math
+import unicodedata
 from typing import Final
 
 import httpx
@@ -40,6 +41,7 @@ from tldw.config import (
     DEFAULT_SPEECH_TIMEOUT_SECONDS,
     MAX_AUDIO_DURATION_SECONDS,
     Settings,
+    validate_http_url,
 )
 from tldw.errors import UserFacingError
 
@@ -51,6 +53,25 @@ TRANSCRIPTIONS_PATH: Final = "audio/transcriptions"
 DEFAULT_AUDIO_FILENAME: Final = "audio.ogg"
 #: MIME-тип аудио по умолчанию.
 DEFAULT_AUDIO_MEDIA_TYPE: Final = "audio/ogg"
+#: Безопасный набор MIME-типов аудио для multipart: без параметров, CRLF и
+#: произвольных значений из Telegram (``media_type`` подставляется в заголовок
+#: части запроса, а httpx экранирует ``filename``, но не ``media_type``).
+ALLOWED_AUDIO_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        "audio/flac",
+        "audio/m4a",
+        "audio/mp3",
+        "audio/mp4",
+        "audio/mpeg",
+        "audio/ogg",
+        "audio/opus",
+        "audio/wav",
+        "audio/webm",
+        "audio/x-flac",
+        "audio/x-m4a",
+        "audio/x-wav",
+    }
+)
 
 MESSAGE_SPEECH_UNAVAILABLE: Final = "Не удалось распознать речь. Попробуйте позже."
 MESSAGE_SPEECH_NOT_CONFIGURED: Final = (
@@ -141,9 +162,7 @@ class SpeechAdapter:
     ) -> None:
         key = api_key.strip()
         model_name = model.strip()
-        base = base_url.strip().rstrip("/")
-        if not base.startswith(("http://", "https://")):
-            raise ValueError("SPEECH_BASE_URL должен начинаться с http:// или https://")
+        base = validate_http_url(base_url, name="SPEECH_BASE_URL")
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout должен быть положительным конечным числом секунд")
 
@@ -196,28 +215,40 @@ class SpeechAdapter:
         :param duration_seconds: длительность аудио в секундах; больше
             :data:`MAX_AUDIO_DURATION_SECONDS` — ошибка до сетевого вызова.
         :param filename: имя файла в multipart-запросе (провайдеру нужен формат).
-        :param media_type: MIME-тип аудио.
+        :param media_type: MIME-тип аудио из :data:`ALLOWED_AUDIO_MEDIA_TYPES`;
+            другие значения и управляющие символы отвергаются как ошибка
+            вызывающего кода до сетевого вызова.
         :raises SpeechNotConfiguredError: ключ или модель не заданы в env.
         :raises SpeechTooLongError: аудио длиннее лимита.
         :raises SpeechTimeoutError: сервис не ответил за таймаут.
-        :raises SpeechProviderError: HTTP-ошибка или сетевой сбой.
+        :raises SpeechProviderError: HTTP-ошибка, сетевой сбой или битый
+            ``SPEECH_BASE_URL``.
         :raises SpeechResponseError: пустой, битый ответ или нет текста.
-        :raises ValueError: если ``duration_seconds``/``audio`` не того типа —
-            это ошибка вызывающего кода, а не ответа сервиса.
+        :raises ValueError: если ``duration_seconds``/``audio``/``media_type``
+            не того типа или не из безопасного набора — это ошибка
+            вызывающего кода, а не ответа сервиса.
         """
-        duration = _check_duration(duration_seconds)
         if not self.is_configured:
             log.warning("Речь: адаптер не настроен — голосовой ввод недоступен")
             raise SpeechNotConfiguredError()
 
+        media = _media_type(media_type)
         data = _audio_bytes(audio)
+        duration = _check_duration(duration_seconds)
         log.info("Речь: запрос распознавания (%.1f с, %s байт)", duration, len(data))
 
-        with self._make_client() as client:
+        try:
+            client = self._make_client()
+        except (httpx.InvalidURL, ValueError) as exc:
+            # Текст httpx может содержать URL с query и ключом — только тип.
+            log.warning("Речь: некорректный URL клиента (%s)", type(exc).__name__)
+            raise SpeechProviderError() from exc
+
+        with client:
             try:
                 response = client.post(
                     TRANSCRIPTIONS_PATH,
-                    files={"file": (filename, data, media_type)},
+                    files={"file": (filename, data, media)},
                     data={"model": self.model},
                 )
             except httpx.TimeoutException as exc:
@@ -229,6 +260,9 @@ class SpeechAdapter:
                     type(exc).__name__,
                 )
                 raise SpeechTimeoutError() from exc
+            except (httpx.InvalidURL, ValueError) as exc:
+                log.warning("Речь: некорректный URL запроса (%s)", type(exc).__name__)
+                raise SpeechProviderError() from exc
             except httpx.HTTPError as exc:
                 log.warning("Речь: сетевая ошибка запроса (%s)", type(exc).__name__)
                 raise SpeechProviderError() from exc
@@ -255,6 +289,28 @@ class SpeechAdapter:
             },
             transport=self._transport,
         )
+
+
+def _media_type(value: object) -> str:
+    """Проверить MIME-тип аудио для multipart-запроса.
+
+    Значение подставляется в заголовок части запроса, поэтому допускаются
+    только MIME-типы из :data:`ALLOWED_AUDIO_MEDIA_TYPES`, без параметров,
+    пробелов и управляющих символов (CRLF добавил бы лишний заголовок).
+    Регистр не важен: возвращается нижнее написание.
+
+    :raises ValueError: если тип не строка, содержит CRLF/пробелы или не
+        входит в безопасный набор (ошибка вызывающего кода).
+    """
+    if not isinstance(value, str):
+        raise ValueError("media_type должен быть строкой MIME-типа")
+    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in value):
+        raise ValueError("media_type не может содержать пробелы и управляющие символы")
+    normalized = value.lower()
+    if normalized not in ALLOWED_AUDIO_MEDIA_TYPES:
+        allowed = ", ".join(sorted(ALLOWED_AUDIO_MEDIA_TYPES))
+        raise ValueError(f"media_type должен быть одним из аудио-MIME-типов: {allowed}")
+    return normalized
 
 
 def _check_duration(value: object) -> float:
@@ -311,6 +367,7 @@ def _transcript_text(response: httpx.Response) -> str:
 
 
 __all__ = [
+    "ALLOWED_AUDIO_MEDIA_TYPES",
     "DEFAULT_AUDIO_FILENAME",
     "DEFAULT_AUDIO_MEDIA_TYPE",
     "MAX_AUDIO_DURATION_SECONDS",

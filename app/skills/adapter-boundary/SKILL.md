@@ -36,10 +36,13 @@ payload/URL в логе, `except Exception` в обработчике, маск�
    `ALL_ENV_VARS`, `.env.example`, README-таблицу и тест
    `test_env_example_lists_every_app_variable_without_secrets`.
    `Settings.repr` не должен показывать ключ.
-3. **Валидация URL — целиком, а не по префиксу.** `urllib.parse.urlsplit`
-   (непустой host, корректный port) или `httpx.URL`; ошибка — `ConfigError`
-   на старте. В адаптере — та же проверка в конструкторе. Помнить:
-   `httpx.InvalidURL` **не** наследник `httpx.HTTPError`.
+3. **Валидация URL — целиком, через общий `config.validate_http_url`.**
+   Не пишите третью проверку в адаптере: `validate_http_url(value, name=...)`
+   проверяет схему, непустой host, порт 1–65535, IPv6, пробелы и `Cc`-символы
+   и возвращает URL без завершающего `/`. Ошибка — `ConfigError` на старте
+   `load_settings`; в конструкторе адаптера — та же функция (для тестов и
+   прямых вызовов). Помнить: `httpx.InvalidURL` **не** наследник
+   `httpx.HTTPError`.
 4. **Таймаут и число попыток.** `httpx.Timeout(self.timeout)`; таймаут —
    конечное положительное число (проверять `math.isfinite`, не только
    `> 0`). Одна попытка по умолчанию; повторы — только если контракт
@@ -131,6 +134,39 @@ HTTP-клиента появился один обработчик. Что по�
   теоретическим. Если будущая задача начнёт передавать тип из апдейта,
   сначала ограничить набор MIME-типов.
 
+## Цикл 13: `InvalidURL` закрыт в LLM и речи, правило стало кодом
+
+T-013 выполнила пункты 3–5 рецепта в обоих HTTP-адаптерах:
+
+- `config.validate_http_url` — одна проверка для `LLM_BASE_URL` и
+  `SPEECH_BASE_URL` (схема, host, порт, IPv6, пробелы/`Cc`), `ConfigError`
+  на старте, значение не попадает в сообщение;
+- `LLMClient` и `SpeechAdapter` оборачивают **и** `_make_client()`, **и**
+  `client.post()`; `httpx.InvalidURL`/`ValueError` → typed provider error;
+- отсутствие ресурса промпта/маркера → `LLMConfigError`, а не `RuntimeError`;
+- `media_type` ограничен `ALLOWED_AUDIO_MEDIA_TYPES` (без CRLF/пробелов,
+  регистр нормализуется);
+- тесты: 8+ битых URL × два адаптера на уровне конфига, `InvalidURL`/
+  `ValueError` на уровне запроса, отсутствующий ресурс, пустой транскрипт.
+
+**Что осталось и что проверить в новом адаптере:**
+
+- `except (InvalidURL, ValueError)` вокруг `post` широк: `ValueError`
+  сериализации payload тоже станет «ошибкой провайдера». Сужайте или
+  комментируйте;
+- `_media_type` на неизвестный MIME кидает plain `ValueError` — при приёме
+  типа из Telegram будет `MESSAGE_UNEXPECTED`; нужен безопасный фолбэк;
+- YouTube-адаптер (T-014) ещё не мигрирован: таймаут, двойной
+  `_extract_info`, приоритет ошибок, `TypeError` вместо
+  `YouTubeNetworkError`, кэш yt-dlp;
+- новый адаптер обязан **переиспользовать** `validate_http_url` и обёртки,
+  а не писать четвёртую копию. Если это невозможно (другой протокол) —
+  объясните в отчёте, почему.
+
+См. `adr-017-typed-error-contract-url-validation.md` и
+`t013-debt-audit.md`.
+
+
 ## См. также
 
 - `app/memory/decisions/adr-004-youtube-adapter-contract.md` — контракт
@@ -139,8 +175,12 @@ HTTP-клиента появился один обработчик. Что по�
   JSON-валидация, `LLMError`.
 - `app/memory/decisions/adr-015-speech-adapter.md` — решение T-011:
   необязательные env, один запрос, 60 секунд, текстовый fallback.
+- `app/memory/decisions/adr-017-typed-error-contract-url-validation.md` —
+  единый `validate_http_url`, обёртки и typed ошибки после T-013.
+- `app/memory/facts/cycle-13-spend.md` — что стоила миграция двух адаптеров
+  (166 шагов EXECUTE, 84 новых теста).
 - `app/memory/facts/invalidurl-escapes-every-adapter.md` — почему
-  `InvalidURL` повторяется и как его ловить.
+  `InvalidURL` повторялся и как его закрыли.
 - `app/memory/facts/t011-review-issues.md` — шесть пунктов ревью T-011.
 - `app/memory/facts/cycle-12-spend.md` — как готовый адаптер подключили к
   сценарию без нового HTTP-клиента.

@@ -88,3 +88,20 @@ T-006/T-008, где адаптер начнёт работать на польз
 
 См. также `t005-review-issues.md`, `tldw-baseline-after-t004.md`,
 `review-debt-accumulates.md`, `cycle-04-spend.md`.
+
+## Что стало в цикле 13 (T-013)
+
+- **P1 закрыт кодом и тестами:** `config.validate_http_url` отвергает битый
+  `LLM_BASE_URL` на старте; `LLMClient` оборачивает `_make_client` и `post`,
+  `httpx.InvalidURL`/`ValueError` → `LLMProviderError`; отсутствие ресурса
+  промпта/маркера → `LLMConfigError` вместо `RuntimeError`. Доказательства —
+  `t013-debt-audit.md`.
+- **`MAX_FOLLOW_UPS`:** аудит показал, что константы **не было** в `__all__`,
+  то есть запись «убрана из `__all__`» читалась неверно. Константа добавлена
+  и покрыта тестом. Это единственный пункт, где память прямо ввела PLAN в
+  заблуждение.
+- **Устарели:** третья копия `_one_line` (закрыта в цикле 10, `tldw/text.py`)
+  и расхождение версий/CHANGELOG.
+- **Остались и переданы:** prompt injection → T-016; `_format_seconds` и
+  лимиты → T-017; пробелы тестов (timeline/конструктор/упаковка) → T-018.
+  Итог: 3 группы закрыто, 3 переданы, 1 устарела.

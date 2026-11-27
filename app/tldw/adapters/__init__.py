@@ -6,6 +6,7 @@
 
 from .llm import (
     LLMClient,
+    LLMConfigError,
     LLMError,
     LLMProviderError,
     LLMResponseError,
@@ -58,6 +59,7 @@ __all__ = [
     "DEFAULT_LANGUAGES",
     "FallbackClient",
     "LLMClient",
+    "LLMConfigError",
     "LLMError",
     "LLMProviderError",
     "LLMResponseError",

@@ -180,6 +180,56 @@ def test_invalid_llm_base_url_is_rejected(fake_env: dict[str, str]) -> None:
         load_settings(env)
 
 
+#: Битые базовые URL: неверный порт, IPv6, пустой host, управляющие символы.
+BAD_BASE_URLS = [
+    "https://host:bad/v1",
+    "https://host:bad/v1?api_key=not-a-real-key",
+    "https://[",
+    "https://[::1",
+    "https://",
+    "https:///v1",
+    "http://",
+    "https://host:0/v1",
+    "https://host:65536/v1",
+    "https://exa\nmple.com/v1",
+    "https://host\r\nX-Injected: 1/v1",
+    "https://ho st/v1",
+    "https://host\x00/v1",
+]
+
+
+@pytest.mark.parametrize("name", ["LLM_BASE_URL", "SPEECH_BASE_URL"])
+@pytest.mark.parametrize("value", BAD_BASE_URLS)
+def test_invalid_base_url_host_port_ipv6_or_control_chars_is_rejected(
+    fake_env: dict[str, str], name: str, value: str
+) -> None:
+    with pytest.raises(ConfigError, match=name) as exc_info:
+        load_settings({**fake_env, name: value})
+
+    # Сообщение называет переменную, но не повторяет значение: в URL может
+    # оказаться ключ или query.
+    message = str(exc_info.value)
+    assert value not in message
+
+
+@pytest.mark.parametrize("name", ["LLM_BASE_URL", "SPEECH_BASE_URL"])
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://[::1]:8443/v1/", "https://[::1]:8443/v1"),
+        ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1"),
+        ("https://api.example.test/v1/?x=1", "https://api.example.test/v1/?x=1"),
+    ],
+)
+def test_valid_base_url_with_port_and_ipv6_is_accepted(
+    fake_env: dict[str, str], name: str, value: str, expected: str
+) -> None:
+    settings = load_settings({**fake_env, name: value})
+
+    attribute = "llm_base_url" if name == "LLM_BASE_URL" else "speech_base_url"
+    assert getattr(settings, attribute) == expected
+
+
 def test_speech_settings_are_optional_and_parsed(fake_env: dict[str, str]) -> None:
     defaults = load_settings(fake_env)
 

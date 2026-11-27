@@ -25,12 +25,15 @@ from tldw.adapters import (
     SpeechTooLongError,
 )
 from tldw.adapters.speech import (
+    ALLOWED_AUDIO_MEDIA_TYPES,
+    DEFAULT_AUDIO_MEDIA_TYPE,
     MESSAGE_SPEECH_NOT_CONFIGURED,
     MESSAGE_SPEECH_TOO_LONG,
 )
 from tldw.config import (
     DEFAULT_SPEECH_BASE_URL,
     DEFAULT_SPEECH_TIMEOUT_SECONDS,
+    ConfigError,
     load_settings,
 )
 from tldw.errors import UserFacingError, describe_error
@@ -400,8 +403,156 @@ def test_audio_bytes_like_objects_are_accepted(audio: object) -> None:
 
 @pytest.mark.parametrize("base_url", ["speech.test/v1", "ftp://speech.test/v1", ""])
 def test_invalid_base_url_is_rejected(base_url: str) -> None:
-    with pytest.raises(ValueError, match="http"):
+    with pytest.raises(ValueError, match="SPEECH_BASE_URL"):
         SpeechAdapter(api_key=FAKE_API_KEY, model=MODEL, base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://speech.test:bad/v1",
+        "https://[",
+        "https://[::1",
+        "https://",
+        "https:///v1",
+        "https://speech.test:0/v1",
+        "https://speech.test:65536/v1",
+        "https://exa\nmple.test/v1",
+        "https://speech.test\r\nX-Injected: 1/v1",
+    ],
+)
+def test_broken_base_url_is_config_error_not_raw_httpx(base_url: str) -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        SpeechAdapter(api_key=FAKE_API_KEY, model=MODEL, base_url=base_url)
+
+    assert base_url not in str(exc_info.value)
+
+
+def test_broken_base_url_at_runtime_is_speech_provider_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Если URL испорчен после конструктора, ``_make_client`` обёрнут."""
+    requests, transport = recording_transport()
+    adapter = make_adapter(transport)
+    adapter.base_url = f"https://speech.test:bad/v1?api_key={FAKE_API_KEY}"
+
+    with (
+        caplog.at_level(logging.WARNING, logger="tldw.adapters.speech"),
+        pytest.raises(SpeechProviderError) as exc_info,
+    ):
+        adapter.transcribe(AUDIO, duration_seconds=1)
+
+    assert requests == [], "до сети дело не доходит"
+    assert isinstance(exc_info.value, UserFacingError)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "InvalidURL" in logged, "в лог попадает только тип исключения"
+    assert FAKE_API_KEY not in logged
+    assert "api_key" not in logged
+    assert "speech.test" not in logged
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.InvalidURL(f"bad https://speech.test/v1?api_key={FAKE_API_KEY}"),
+        ValueError(f"bad https://speech.test/v1?api_key={FAKE_API_KEY}"),
+    ],
+    ids=["invalid-url", "value-error"],
+)
+def test_request_url_error_is_speech_provider_error(
+    error: Exception,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise error
+
+    with (
+        caplog.at_level(logging.WARNING, logger="tldw.adapters.speech"),
+        pytest.raises(SpeechProviderError) as exc_info,
+    ):
+        make_adapter(httpx.MockTransport(handler)).transcribe(AUDIO, duration_seconds=1)
+
+    assert len(calls) == 1
+    assert isinstance(exc_info.value, UserFacingError)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert type(error).__name__ in logged
+    assert FAKE_API_KEY not in logged
+    assert "api_key" not in logged
+    assert "https://" not in logged
+
+
+@pytest.mark.parametrize(
+    "media_type",
+    [
+        "audio/ogg\r\nX-Injected: 1",
+        "audio/ogg\n",
+        "audio/ogg ",
+        "audio/ogg; codecs=opus",
+        "text/plain",
+        "application/octet-stream",
+        "",
+    ],
+)
+def test_unsafe_media_type_is_a_caller_error_before_network(media_type: str) -> None:
+    requests, transport = recording_transport()
+
+    with pytest.raises(ValueError):
+        make_adapter(transport).transcribe(
+            AUDIO,
+            duration_seconds=1,
+            media_type=media_type,
+        )
+
+    assert requests == [], "битый media_type не уходит в multipart"
+
+
+@pytest.mark.parametrize("media_type", ["audio/ogg", "AUDIO/OGG", "audio/mpeg", "Audio/Mp4"])
+def test_safe_media_type_is_normalized_and_sent(media_type: str) -> None:
+    requests, transport = recording_transport()
+
+    text = make_adapter(transport).transcribe(
+        AUDIO,
+        duration_seconds=1,
+        media_type=media_type,
+    )
+
+    assert text == TRANSCRIPT
+    assert len(requests) == 1
+    expected = media_type.lower().encode()
+    assert b"Content-Type: " + expected + b"\r\n" in requests[0].content
+
+
+def test_every_default_media_type_is_in_the_safe_set() -> None:
+    assert "audio/ogg" in ALLOWED_AUDIO_MEDIA_TYPES
+    assert DEFAULT_AUDIO_MEDIA_TYPE in ALLOWED_AUDIO_MEDIA_TYPES
+
+
+@pytest.mark.parametrize("media_type", [None, 123, b"audio/ogg"])
+def test_non_string_media_type_is_a_caller_error(media_type: object) -> None:
+    requests, transport = recording_transport()
+
+    with pytest.raises(ValueError):
+        make_adapter(transport).transcribe(
+            AUDIO,
+            duration_seconds=1,
+            media_type=media_type,  # type: ignore[arg-type]
+        )
+
+    assert requests == []
+
+
+def test_unconfigured_adapter_reports_not_configured_before_too_long() -> None:
+    """Порядок P3 T-011: «не настроено» важнее «слишком длинное»."""
+    requests, transport = recording_transport()
+    adapter = SpeechAdapter(api_key="", model="", base_url=BASE_URL, transport=transport)
+
+    with pytest.raises(SpeechNotConfiguredError):
+        adapter.transcribe(AUDIO, duration_seconds=MAX_AUDIO_DURATION_SECONDS + 1)
+
+    assert requests == []
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])

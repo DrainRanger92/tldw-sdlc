@@ -105,3 +105,18 @@ T-012 закрыла три группы из шести: handoff (P2) не по
 `invalidurl-escapes-every-adapter.md`,
 `t001-t010-review-issues.md`, `t004-review-issues.md`,
 `tldw-baseline-after-t011.md`, `adr-015-speech-adapter.md`.
+
+## Что стало в цикле 13 (T-013)
+
+- **P2 `InvalidURL` закрыт:** `SpeechAdapter` валидирует `SPEECH_BASE_URL`
+  в конструкторе, оборачивает `_make_client()` и `client.post()`,
+  `httpx.InvalidURL`/`ValueError` → `SpeechProviderError`; конфиг падает
+  `ConfigError` на старте. Тесты `test_broken_base_url_*`,
+  `test_request_url_error_*`.
+- **P3 `media_type` закрыт частично:** `ALLOWED_AUDIO_MEDIA_TYPES` и
+  `_media_type` ограничивают набор MIME; но на неизвестный тип всё ещё
+  летит plain `ValueError`, а не `SpeechError` (P2 ревью T-013) — это
+  осталось в долге и попадает в T-015/T-016, когда тип придёт из Telegram.
+- **Остались:** `reason_phrase` сервера в логе → T-016; тестовые дубли
+  `BASE_ENV` → T-018.
+- Итог: 2 группы закрыто (P2 + P3), 2 переданы, 2 устарели в цикле 12.

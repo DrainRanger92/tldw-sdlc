@@ -23,7 +23,9 @@ README, минус переписанные кейсы обработчика); 
 в T-011 — **52 кейса** `test_speech_adapter.py` на `MockTransport` и 9
 кейсов конфига (4 функции с параметризацией); в T-012 — **20 нетто**
 (`test_voice_handler.py` 15 + `test_voice_e2e.py` 5) и +14 в существующих
-файлах. Всего в наборе **927 тестов** в 28 файлах.
+файлах; в T-013 — **84 нетто** в четырёх файлах (`test_llm_adapter.py` 68
+кейсов, `test_speech_adapter.py` 80, плюс конфиг и сервис), новых файлов
+нет. Всего в наборе **1011 тестов** в 28 файлах.
 
 ## Когда применять
 
@@ -355,8 +357,9 @@ cd app
 Тесты без файловых операций (как `test_youtube_adapter.py`,
 `test_llm_adapter.py`, `test_access.py`, `test_errors.py` и `test_readme.py`)
 не используют `tmp_path` и потому проходят даже в read-only песочнице
-ревьюера. После T-012 полный набор — **927 тестов в 28 файлах**; файлы
-адаптеров (включая `test_speech_adapter.py` — 52 кейса), `test_access.py`,
+ревьюера. После T-013 полный набор — **1011 тестов в 28 файлах**; файлы
+адаптеров (включая `test_speech_adapter.py` — 80 кейсов,
+`test_llm_adapter.py` — 68), `test_access.py`,
 `test_errors.py`, `test_readme.py`, `test_template.py`,
 `test_template_parser.py`, `test_template_handler.py` (30 сценариев FSM) и
 `test_voice_handler.py` (15 кейсов) проходят в read-only целиком или почти
@@ -371,7 +374,10 @@ passed + 93 env-errors из 343, в цикле 9 полный прогон не�
 исполнялись, **в цикле 11 — 685 passed + 208 env-errors из 893 (77 %)**,
 `test_speech_adapter.py` прошёл целиком, **в цикле 12 — 703 passed + 224
 env-errors из 927 (76 %)**, `test_voice_handler.py` 15/15, `test_readme.py`
-41/41, `test_voice_e2e.py` не исполнялся. Поэтому сценарные кейсы, которым
+41/41, `test_voice_e2e.py` не исполнялся; **в цикле 13 — 753 passed + 258
+env-errors из 1011 (74,5 %)**, `test_llm_adapter.py` 68/68 и
+`test_speech_adapter.py` 80/80, а новые кейсы `test_config`/
+`test_summary_service` с `tmp_path` — нет. Поэтому сценарные кейсы, которым
 нужен `tmp_path`, оставляйте гейту VERIFY, а в read-only проверяйте чистые
 функции и не-файловые ветки.
 

@@ -16,6 +16,7 @@ import pytest
 
 from tldw.adapters import (
     LLMClient,
+    LLMConfigError,
     LLMError,
     LLMProviderError,
     LLMResponseError,
@@ -27,7 +28,9 @@ from tldw.adapters import (
     build_user_prompt,
     parse_summary,
 )
+from tldw.adapters import llm as llm_module
 from tldw.adapters.llm import (
+    CUSTOM_PROMPT_RESOURCE,
     MAX_FOLLOW_UPS,
     MAX_KEY_IDEAS,
     MAX_QUOTES,
@@ -37,9 +40,13 @@ from tldw.adapters.llm import (
     MIN_KEY_IDEAS,
     MIN_QUOTES,
     MIN_TLDR,
+    PROMPT_RESOURCE,
+    build_custom_system_prompt,
+    build_template_parse_prompt,
     load_note_template,
 )
-from tldw.config import load_settings
+from tldw.config import ConfigError, load_settings
+from tldw.errors import UserFacingError
 from tldw.services.note import SECTION_HEADINGS
 
 FAKE_API_KEY = "test-llm-key-not-a-secret"
@@ -272,6 +279,200 @@ def test_invalid_timeout_is_rejected() -> None:
     for bad_timeout in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError):
             LLMClient(api_key=FAKE_API_KEY, model=MODEL, timeout=bad_timeout)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://llm.test:bad/v1",
+        "https://[",
+        "https://[::1",
+        "https://",
+        "https:///v1",
+        "https://llm.test:0/v1",
+        "https://llm.test:65536/v1",
+        "https://exa\nmple.test/v1",
+        "https://llm.test\r\nX-Injected: 1/v1",
+    ],
+)
+def test_broken_base_url_is_config_error_not_raw_httpx(base_url: str) -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        LLMClient(api_key=FAKE_API_KEY, model=MODEL, base_url=base_url)
+
+    assert base_url not in str(exc_info.value)
+
+
+def test_broken_base_url_at_runtime_is_llm_provider_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Если URL испорчен после конструктора, создание клиента обёрнуто."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return chat_response(valid_content())
+
+    client = make_client(httpx.MockTransport(handler))
+    client.base_url = f"https://llm.test:bad/v1?api_key={FAKE_API_KEY}"
+
+    with (
+        caplog.at_level(logging.WARNING, logger="tldw.adapters.llm"),
+        pytest.raises(LLMProviderError) as exc_info,
+    ):
+        client.summarize(TRANSCRIPT)
+
+    assert requests == [], "до сети дело не доходит"
+    assert isinstance(exc_info.value, LLMError)
+    assert isinstance(exc_info.value, UserFacingError)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "InvalidURL" in logged, "в лог попадает только тип исключения"
+    assert FAKE_API_KEY not in logged
+    assert "api_key" not in logged
+    assert "llm.test" not in logged
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.InvalidURL(f"bad https://llm.test/v1?api_key={FAKE_API_KEY}&q=secret"),
+        ValueError(f"bad https://llm.test/v1?api_key={FAKE_API_KEY}&q=secret"),
+    ],
+    ids=["invalid-url", "value-error"],
+)
+def test_request_url_error_is_llm_provider_error(
+    error: Exception,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise error
+
+    with (
+        caplog.at_level(logging.WARNING, logger="tldw.adapters.llm"),
+        pytest.raises(LLMProviderError) as exc_info,
+    ):
+        make_client(httpx.MockTransport(handler)).summarize(TRANSCRIPT)
+
+    assert len(calls) == 1
+    assert isinstance(exc_info.value, LLMError)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert type(error).__name__ in logged
+    assert FAKE_API_KEY not in logged
+    assert "api_key" not in logged
+    assert "q=secret" not in logged
+    assert "https://" not in logged
+
+
+def test_value_error_when_building_client_is_typed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken_client(*args: object, **kwargs: object) -> httpx.Client:
+        raise ValueError(f"bad {FAKE_API_KEY}")
+
+    monkeypatch.setattr(llm_module.httpx, "Client", broken_client)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="tldw.adapters.llm"),
+        pytest.raises(LLMProviderError) as exc_info,
+    ):
+        make_client(httpx.MockTransport(lambda request: chat_response(valid_content()))).summarize(
+            TRANSCRIPT
+        )
+
+    assert isinstance(exc_info.value, LLMError)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "ValueError" in logged
+    assert FAKE_API_KEY not in logged
+
+
+def test_missing_prompt_resource_raises_typed_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    build_system_prompt.cache_clear()
+    monkeypatch.setattr(llm_module, "PROMPT_RESOURCE", "missing_prompt.md")
+
+    try:
+        with (
+            caplog.at_level(logging.ERROR, logger="tldw.adapters.llm"),
+            pytest.raises(LLMConfigError) as exc_info,
+        ):
+            build_system_prompt()
+    finally:
+        build_system_prompt.cache_clear()
+
+    error = exc_info.value
+    assert isinstance(error, LLMError)
+    assert isinstance(error, UserFacingError)
+    assert "missing_prompt.md" not in str(error)
+    assert "AI" in str(error)
+    assert "missing_prompt.md" in caplog.text, "имя ресурса видно в логе"
+    assert FAKE_API_KEY not in caplog.text
+
+
+def test_missing_template_marker_raises_typed_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_system_prompt.cache_clear()
+    monkeypatch.setattr(llm_module, "TEMPLATE_PLACEHOLDER", "{{MISSING_MARKER}}")
+
+    try:
+        with pytest.raises(LLMConfigError):
+            build_system_prompt()
+    finally:
+        build_system_prompt.cache_clear()
+
+
+def test_missing_custom_prompt_marker_raises_typed_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(llm_module, "CUSTOM_PROMPT_RESOURCE", PROMPT_RESOURCE)
+
+    with pytest.raises(LLMConfigError):
+        build_custom_system_prompt(["Раздел"])
+
+
+def test_missing_template_parse_prompt_marker_raises_typed_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(llm_module, "TEMPLATE_PARSE_PROMPT_RESOURCE", CUSTOM_PROMPT_RESOURCE)
+
+    with pytest.raises(LLMConfigError):
+        build_template_parse_prompt(["Раздел"])
+
+
+def test_missing_prompt_resource_does_not_reach_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return chat_response(valid_content())
+
+    build_system_prompt.cache_clear()
+    monkeypatch.setattr(llm_module, "PROMPT_RESOURCE", "missing_prompt.md")
+
+    try:
+        with pytest.raises(LLMConfigError):
+            make_client(httpx.MockTransport(handler)).summarize(TRANSCRIPT)
+    finally:
+        build_system_prompt.cache_clear()
+
+    assert requests == [], "неполный промпт не уходит провайдеру"
+
+
+def test_error_hierarchy_includes_config_error() -> None:
+    assert issubclass(LLMConfigError, LLMError)
+    assert str(LLMConfigError())
+
+
+def test_follow_up_limits_are_both_in_public_surface() -> None:
+    """P2 T-004: ``MAX_FOLLOW_UPS`` не должен выпадать из ``__all__``."""
+    assert {"MIN_FOLLOW_UPS", "MAX_FOLLOW_UPS"} <= set(llm_module.__all__)
 
 
 def test_connection_error_raises_provider_error() -> None:

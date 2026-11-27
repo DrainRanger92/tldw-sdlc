@@ -35,6 +35,7 @@ from tldw.adapters.youtube import (
     VideoMetadata,
 )
 from tldw.config import DEFAULT_MAX_VIDEO_DURATION_SECONDS, load_settings
+from tldw.errors import UserFacingError
 from tldw.services.note import (
     SECTION_HEADINGS,
     Note,
@@ -43,7 +44,9 @@ from tldw.services.note import (
     render_note,
 )
 from tldw.services.summary import (
+    MESSAGE_EMPTY_TRANSCRIPT,
     TRANSCRIPT_TRUNCATION_MARKER,
+    EmptyTranscriptError,
     SummaryService,
     VideoTooLongError,
     build_note,
@@ -453,11 +456,74 @@ def test_join_transcript_rejects_invalid_limit(limit: object) -> None:
 
 
 def test_join_transcript_handles_limit_smaller_than_marker() -> None:
-    material = join_transcript(make_transcript(), max_chars=10)
+    transcript = make_transcript()
+    marker = TRANSCRIPT_TRUNCATION_MARKER.format(used=3, total=3)
+
+    material = join_transcript(transcript, max_chars=len(marker) - 1)
 
     assert material.truncated is True
+    assert material.is_empty is True, "обрезанный маркер не должен уходить в промпт"
+    assert material.text == ""
     assert material.used_segments == 0
-    assert len(material.text) <= 10
+    assert material.total_segments == 3
+    assert len(material.text) < len(marker)
+
+
+def test_join_transcript_with_zero_budget_does_not_count_empty_segment() -> None:
+    """``limit == len(маркера) + 1`` даёт budget 0: пустая строка — не сегмент."""
+    transcript = make_transcript()
+    marker = TRANSCRIPT_TRUNCATION_MARKER.format(used=3, total=3)
+
+    material = join_transcript(transcript, max_chars=len(marker) + 1)
+
+    assert material.truncated is True
+    assert material.text == "", "пустая строка не должна начинать материал"
+    assert material.used_segments == 0, "пустая строка не считается сегментом"
+    assert material.total_segments == 3
+    assert len(material.text) <= len(marker) + 1
+
+
+def test_join_transcript_exact_marker_fit_is_degenerate_not_truncated_marker() -> None:
+    transcript = make_transcript()
+    marker = TRANSCRIPT_TRUNCATION_MARKER.format(used=3, total=3)
+
+    material = join_transcript(transcript, max_chars=len(marker))
+
+    assert material.is_empty is True
+    assert material.text == ""
+    assert material.used_segments == 0
+
+
+def test_empty_transcript_is_rejected_before_llm_and_file(data_dir: Path) -> None:
+    source = FakeVideoSource(video=make_video(transcript=Transcript()))
+    client = FakeSummarizer(summary=make_summary())
+    service = SummaryService(source, client, data_dir=data_dir)
+
+    with pytest.raises(EmptyTranscriptError) as exc_info:
+        service.process(URL)
+
+    error = exc_info.value
+    assert isinstance(error, UserFacingError)
+    assert str(error) == MESSAGE_EMPTY_TRANSCRIPT
+    assert "субтитр" in str(error)
+    assert client.calls == [], "LLM не вызывается для пустого транскрипта"
+    assert list(data_dir.rglob("*")) == [], "ни .md, ни временных файлов"
+    assert not data_dir.exists()
+    assert source.calls == [URL], "источник видео вызывается один раз"
+
+
+def test_degenerate_transcript_limit_is_rejected_before_llm(data_dir: Path) -> None:
+    """Лимит меньше маркера усечения не должен давать LLM пустой материал."""
+    source = FakeVideoSource(video=make_video())
+    client = FakeSummarizer(summary=make_summary())
+    service = SummaryService(source, client, max_transcript_chars=10, data_dir=data_dir)
+
+    with pytest.raises(EmptyTranscriptError):
+        service.process(URL)
+
+    assert client.calls == []
+    assert list(data_dir.rglob("*")) == []
+    assert not data_dir.exists()
 
 
 def test_truncated_transcript_does_not_break_llm_json_pipeline(data_dir: Path) -> None:

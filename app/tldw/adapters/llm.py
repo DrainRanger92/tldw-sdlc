@@ -4,6 +4,8 @@
 не импортируют ``httpx`` и не знают формат ответа провайдера. Контракт:
 
 1. промпт и шаблон заметки — ресурсы пакета (``adapters/resources``), а не env;
+   отсутствие ресурса или маркера подстановки — :class:`LLMConfigError`
+   (наследник ``UserFacingError``), а не сырой ``RuntimeError``;
 2. ключ, модель, базовый URL и таймаут приходят из :class:`tldw.config.Settings`;
 3. запрос идёт в OpenAI-совместимый ``chat/completions`` с требованием JSON;
 4. ответ строго валидируется по разделам шаблона **до** модели заметки:
@@ -12,7 +14,8 @@
    для пользовательского шаблона проверяются ровно те же разделы в том же
    порядке и их лимиты;
 5. таймаут и HTTP-ошибки провайдера поднимаются как :class:`LLMError`;
-   повтор ограничен кодами 429 и 5xx;
+   ``httpx.InvalidURL``/``ValueError`` при создании клиента и запросе тоже
+   оборачиваются, повтор ограничен кодами 429 и 5xx;
 6. разбор описания шаблона человеческим языком
    (:meth:`LLMClient.parse_template`) — это **второй** сценарий того же
    клиента: один вызов LLM через общий приватный метод (тот же таймаут и
@@ -45,6 +48,7 @@ from tldw.config import (
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_TIMEOUT_SECONDS,
     Settings,
+    validate_http_url,
 )
 from tldw.errors import TemplateParseError, UserFacingError
 from tldw.text import one_line
@@ -150,6 +154,9 @@ MAX_TEMPLATE_DESCRIPTION_LENGTH: Final = 4000
 MESSAGE_LLM_UNAVAILABLE: Final = "AI не ответил. Попробуйте позже."
 MESSAGE_LLM_TIMEOUT: Final = "AI не ответил вовремя. Попробуйте позже."
 MESSAGE_LLM_BAD_RESPONSE: Final = "AI вернул некорректный ответ. Попробуйте позже."
+MESSAGE_LLM_CONFIG: Final = (
+    "AI временно недоступен из-за ошибки настройки. Попробуйте позже."
+)
 
 #: Сообщения разбора описания шаблона (T-006) — на русском, без текста шаблона.
 MESSAGE_TEMPLATE_DESCRIPTION_RANGE: Final = (
@@ -205,6 +212,18 @@ class LLMResponseError(LLMError):
     """Ответ провайдера пуст, не JSON или не соответствует шаблону."""
 
     def __init__(self, message: str = MESSAGE_LLM_BAD_RESPONSE) -> None:
+        super().__init__(message)
+
+
+class LLMConfigError(LLMError):
+    """Не найден ресурс промпта или в нём нет обязательного маркера подстановки.
+
+    Это ошибка сборки/упаковки, а не ответа провайдера, но пользователь должен
+    получить понятный текст, а обработчик — типизированную ``UserFacingError``,
+    поэтому ошибка наследуется от :class:`LLMError`, а не от ``RuntimeError``.
+    """
+
+    def __init__(self, message: str = MESSAGE_LLM_CONFIG) -> None:
         super().__init__(message)
 
 
@@ -307,13 +326,11 @@ class LLMClient:
     ) -> None:
         key = api_key.strip()
         model_name = model.strip()
-        base = base_url.strip().rstrip("/")
+        base = validate_http_url(base_url, name="LLM_BASE_URL")
         if not key:
             raise ValueError("LLM_API_KEY не задан")
         if not model_name:
             raise ValueError("LLM_MODEL не задан")
-        if not base.startswith(("http://", "https://")):
-            raise ValueError("LLM_BASE_URL должен начинаться с http:// или https://")
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout должен быть положительным конечным числом секунд")
         if max_attempts < 1:
@@ -454,8 +471,20 @@ class LLMClient:
         только на 429/5xx и преобразование сбоев в :class:`LLMError` живут
         здесь, поэтому разбор шаблона (T-006) не дублирует их. Возвращает
         ``content`` первого choice — уже текст ответа модели.
+
+        Создание клиента и запрос обёрнуты одинаково: ``httpx.InvalidURL`` не
+        наследуется от ``httpx.HTTPError``, а ``ValueError`` может прийти из
+        разбора адреса/заголовков, поэтому оба превращаются в
+        :class:`LLMProviderError`. В лог пишется только тип исключения: текст
+        httpx может содержать URL с query и ключом.
         """
-        with self._make_client() as client:
+        try:
+            client = self._make_client()
+        except (httpx.InvalidURL, ValueError) as exc:
+            log.warning("LLM: некорректный URL клиента (%s)", type(exc).__name__)
+            raise LLMProviderError() from exc
+
+        with client:
             for attempt in range(1, self.max_attempts + 1):
                 try:
                     response = client.post(CHAT_COMPLETIONS_PATH, json=payload)
@@ -468,6 +497,14 @@ class LLMClient:
                         type(exc).__name__,
                     )
                     raise LLMTimeoutError() from exc
+                except (httpx.InvalidURL, ValueError) as exc:
+                    log.warning(
+                        "LLM: некорректный URL запроса (попытка %s/%s, %s)",
+                        attempt,
+                        self.max_attempts,
+                        type(exc).__name__,
+                    )
+                    raise LLMProviderError() from exc
                 except httpx.HTTPError as exc:
                     log.warning(
                         "LLM: сетевая ошибка запроса (попытка %s/%s, %s)",
@@ -656,7 +693,12 @@ def build_system_prompt() -> str:
     prompt = load_summary_prompt()
     template = load_note_template()
     if TEMPLATE_PLACEHOLDER not in prompt:
-        raise RuntimeError(f"В ресурсе {PROMPT_RESOURCE} нет маркера {TEMPLATE_PLACEHOLDER}")
+        log.error(
+            "LLM: в ресурсе %s нет маркера подстановки %s",
+            PROMPT_RESOURCE,
+            TEMPLATE_PLACEHOLDER,
+        )
+        raise LLMConfigError()
     return prompt.replace(TEMPLATE_PLACEHOLDER, template).strip()
 
 
@@ -674,7 +716,7 @@ def build_custom_system_prompt(sections: Sequence[str], tone: str = "") -> str:
 
     :raises ValueError: если ``sections`` — не последовательность непустых
         уникальных строк, а ``tone`` — не строка.
-    :raises RuntimeError: если ресурс промпта потерял маркер подстановки.
+    :raises LLMConfigError: если ресурс промпта потерял маркер подстановки.
     """
     heading_list = _requested_sections(sections)
     if heading_list is None:
@@ -711,7 +753,7 @@ def build_template_parse_prompt(
 
     :raises ValueError: если ``current_sections`` — не последовательность
         непустых строк, а ``current_tone`` — не строка.
-    :raises RuntimeError: если ресурс промпта потерял маркер подстановки.
+    :raises LLMConfigError: если ресурс промпта потерял маркер подстановки.
     """
     headings = _template_current_sections(current_sections)
     tone = _template_current_tone(current_tone)
@@ -723,10 +765,12 @@ def build_template_parse_prompt(
     }
     missing = [placeholder for placeholder in values if placeholder not in template]
     if missing:
-        raise RuntimeError(
-            "В ресурсе "
-            f"{TEMPLATE_PARSE_PROMPT_RESOURCE} нет маркеров: {', '.join(missing)}"
+        log.error(
+            "LLM: в ресурсе %s нет маркеров: %s",
+            TEMPLATE_PARSE_PROMPT_RESOURCE,
+            ", ".join(missing),
         )
+        raise LLMConfigError()
     rendered = _TEMPLATE_PARSE_PLACEHOLDER_RE.sub(lambda match: values[match.group()], template)
     return re.sub(r"\n{3,}", "\n\n", rendered).strip()
 
@@ -867,9 +911,12 @@ def _render_custom_prompt(headings: tuple[str, ...], tone: str) -> str:
     }
     missing = [placeholder for placeholder in values if placeholder not in template]
     if missing:
-        raise RuntimeError(
-            f"В ресурсе {CUSTOM_PROMPT_RESOURCE} нет маркеров: {', '.join(missing)}"
+        log.error(
+            "LLM: в ресурсе %s нет маркеров: %s",
+            CUSTOM_PROMPT_RESOURCE,
+            ", ".join(missing),
         )
+        raise LLMConfigError()
     rendered = _DYNAMIC_PLACEHOLDER_RE.sub(lambda match: values[match.group()], template)
     # Пустая подстановка (нет встроенных заголовков) не должна оставлять
     # пустую строку внутри списка ограничений.
@@ -992,11 +1039,19 @@ def _dynamic_items(value: object, heading: str, index: int) -> tuple[str, ...]:
 
 
 def _read_resource(name: str) -> str:
+    """Прочитать ресурс пакета; отсутствие файла — типизированная LLMError.
+
+    ``RuntimeError`` здесь был бы сырым исключением: он вылетал бы мимо
+    контракта ``LLMError``/``UserFacingError``. Поэтому ошибка упаковки
+    превращается в :class:`LLMConfigError`, а в лог попадает только имя
+    ресурса и тип исключения.
+    """
     try:
         resource = resources.files(RESOURCES_PACKAGE).joinpath(name)
         return resource.read_text(encoding="utf-8").strip()
     except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
-        raise RuntimeError(f"Не найден ресурс LLM-адаптера: {name}") from exc
+        log.error("LLM: не найден ресурс адаптера %s (%s)", name, type(exc).__name__)
+        raise LLMConfigError() from exc
 
 
 def _completion_content(response: httpx.Response) -> str:
@@ -1202,11 +1257,13 @@ __all__ = [
     "DEFAULT_BACKOFF_SECONDS",
     "DEFAULT_MAX_ATTEMPTS",
     "LLMClient",
+    "LLMConfigError",
     "LLMError",
     "LLMProviderError",
     "LLMResponseError",
     "LLMTimeoutError",
     "MAX_CUSTOM_SECTION_ITEMS",
+    "MAX_FOLLOW_UPS",
     "MAX_KEY_IDEAS",
     "MAX_PATCH_OUTPUT_TOKENS",
     "MAX_QUOTES",
@@ -1217,6 +1274,7 @@ __all__ = [
     "MAX_TIMELINE_ENTRIES",
     "MAX_TLDR",
     "MESSAGE_LLM_BAD_RESPONSE",
+    "MESSAGE_LLM_CONFIG",
     "MESSAGE_LLM_TIMEOUT",
     "MESSAGE_LLM_UNAVAILABLE",
     "MESSAGE_TEMPLATE_DESCRIPTION_RANGE",

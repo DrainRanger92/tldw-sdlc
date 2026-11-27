@@ -28,9 +28,11 @@ from tldw.services.note import (
 )
 from tldw.services.summary import (
     DEFAULT_MAX_TRANSCRIPT_CHARS,
+    MESSAGE_EMPTY_TRANSCRIPT,
     MESSAGE_VIDEO_TOO_LONG,
     TEMPLATE_ORIGIN_LABELS,
     TRANSCRIPT_TRUNCATION_MARKER,
+    EmptyTranscriptError,
     SummaryProvider,
     SummaryResult,
     SummaryService,
@@ -77,6 +79,7 @@ __all__ = [
     "MAX_SECTION_ITEMS",
     "MAX_SECTIONS",
     "MAX_TONE_LENGTH",
+    "MESSAGE_EMPTY_TRANSCRIPT",
     "MESSAGE_VIDEO_TOO_LONG",
     "MIN_DESCRIPTION_LENGTH",
     "MIN_SECTION_ITEMS",
@@ -86,6 +89,7 @@ __all__ = [
     "TEMPLATE_ORIGIN_LABELS",
     "TRANSCRIPT_TRUNCATION_MARKER",
     "ActiveTemplate",
+    "EmptyTranscriptError",
     "Note",
     "NoteSection",
     "NoteTemplate",

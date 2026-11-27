@@ -11,9 +11,11 @@ from __future__ import annotations
 import math
 import os
 import re
+import unicodedata
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_ENV_FILE = APP_DIR / ".env"
@@ -76,6 +78,8 @@ _BOT_TOKEN_RE = re.compile(r"^[0-9]+:[^\s]+$")
 _USER_ID_RE = re.compile(r"^[0-9]+$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _INLINE_COMMENT_RE = re.compile(r"\s+#")
+#: Схемы, которые принимаются в базовых URL внешних HTTP-API.
+_HTTP_SCHEMES = frozenset({"http", "https"})
 
 
 class ConfigError(ValueError):
@@ -282,13 +286,53 @@ def _parse_base_url(raw: str | None) -> str:
     return _parse_http_url(raw, ENV_LLM_BASE_URL, default=DEFAULT_LLM_BASE_URL)
 
 
+def validate_http_url(value: str, *, name: str) -> str:
+    """Проверить абсолютный HTTP(S)-URL и вернуть его без завершающего ``/``.
+
+    Проверяется не только схема, но и весь адрес: непустой host, корректный
+    порт (1–65535), отсутствие пробелов и управляющих символов. Так опечатка
+    в ``*_BASE_URL`` отвергается на старте :class:`ConfigError`, а не сырым
+    ``httpx.InvalidURL`` в момент запроса.
+
+    :param value: значение переменной окружения или аргумент конструктора.
+    :param name: имя переменной для понятного сообщения об ошибке.
+    :raises ConfigError: если URL пуст, не http(s), без host или с битым
+        портом/IPv6/управляющими символами. Значение в сообщение не попадает.
+    """
+    if not isinstance(value, str):
+        raise ConfigError(f"{name}: ожидается строка URL.")
+    url = value.strip()
+    if not url:
+        raise ConfigError(f"{name} не может быть пустым. {CONFIG_HINT}")
+    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in url):
+        raise ConfigError(
+            f"{name}: URL не может содержать пробелы и управляющие символы."
+        )
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise ConfigError(
+            f"{name}: неверный URL — проверьте схему, host и порт."
+        ) from None
+    if parts.scheme.lower() not in _HTTP_SCHEMES:
+        raise ConfigError(f"{name} должна начинаться с http:// или https://.")
+    try:
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        raise ConfigError(f"{name}: неверный порт в URL.") from None
+    if not host:
+        raise ConfigError(f"{name}: в URL не указан host.")
+    if port is not None and not 1 <= port <= 65535:
+        raise ConfigError(f"{name}: порт должен быть от 1 до 65535.")
+    return url.rstrip("/")
+
+
 def _parse_http_url(raw: str | None, name: str, *, default: str) -> str:
     """Разобрать необязательный базовый URL HTTP-API (LLM или распознавания)."""
     if raw is None:
         return default
-    if not raw.startswith(("http://", "https://")):
-        raise ConfigError(f"{name} должна начинаться с http:// или https://.")
-    return raw.rstrip("/")
+    return validate_http_url(raw, name=name)
 
 
 def _parse_data_dir(raw: str | None) -> Path:
@@ -337,4 +381,5 @@ __all__ = [
     "load_env_file",
     "load_settings",
     "read_env_file",
+    "validate_http_url",
 ]

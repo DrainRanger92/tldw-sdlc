@@ -12,9 +12,9 @@
 
 | Цикл | Адаптер | Где | Что происходит | Статус |
 |---|---|---|---|---|
-| 4 (T-004) | `adapters/llm.py` | `LLMAdapter` | `httpx.InvalidURL` и `RuntimeError` отсутствующего ресурса выходят мимо `LLMError`; ловится только `HTTPError` | **P1, открыт** |
-| 11 (T-011) | `adapters/speech.py` | `SpeechAdapter.transcribe` | `SPEECH_BASE_URL=https://x.test:bad/v1` проходит `load_settings` и конструктор; `transcribe()` поднимает сырой `httpx.InvalidURL`, не `SpeechError`; `_make_client()` вне `try` | **P2, новый** |
-| 3 (T-003) | `adapters/youtube.py` | `YoutubeAdapter` | родственный класс: `TypeError` вместо `YouTubeNetworkError` при неверном ответе библиотеки | P1, открыт |
+| 4 (T-004) | `adapters/llm.py` | `LLMAdapter` | `httpx.InvalidURL` и `RuntimeError` отсутствующего ресурса выходят мимо `LLMError`; ловится только `HTTPError` | **P1, закрыт в цикле 13** |
+| 11 (T-011) | `adapters/speech.py` | `SpeechAdapter.transcribe` | `SPEECH_BASE_URL=https://x.test:bad/v1` проходит `load_settings` и конструктор; `transcribe()` поднимает сырой `httpx.InvalidURL`, не `SpeechError`; `_make_client()` вне `try` | **P2, закрыт в цикле 13** |
+| 3 (T-003) | `adapters/youtube.py` | `YoutubeAdapter` | родственный класс: `TypeError` вместо `YouTubeNetworkError` при неверном ответе библиотеки | P1, открыт (T-014) |
 
 Оба HTTP-адаптера повторяют одну форму: `try: client.post(...) except
 httpx.TimeoutException ... except httpx.HTTPError ...`. `InvalidURL`
@@ -56,8 +56,30 @@ httpx.TimeoutException ... except httpx.HTTPError ...`. `InvalidURL`
 T-012 подключила голос, но `InvalidURL` в `SpeechAdapter` не закрыла (не
 входил в критерии) — обработчик проверяет `is_configured` до вызова, однако
 `_make_client()` остался вне `try`, а конфиг проверяет только схему URL.
-P2 T-011 перешёл в третий цикл. Пока P1 T-004 не закрыт, следующий адаптер
-получит ту же дыру, если не добавить `InvalidURL` в шаблон.
+P2 T-011 перешёл в третий цикл.
+
+## Цикл 13: правило стало кодом
+
+T-013 закрыла дыру в обоих HTTP-адаптерах и сделала рецепт общим:
+
+- `config.validate_http_url()` — единая проверка схемы, host, порта, IPv6,
+  пробелов и `Cc`-символов; `LLM_BASE_URL` и `SPEECH_BASE_URL` падают
+  `ConfigError` **на старте**;
+- `LLMClient` оборачивает `_make_client()` и `post`:
+  `httpx.InvalidURL`/`ValueError` → `LLMProviderError`; отсутствие ресурса
+  промпта → `LLMConfigError`;
+- `SpeechAdapter` оборачивает создание клиента и запрос так же, плюс
+  `ALLOWED_AUDIO_MEDIA_TYPES`;
+- тесты: 8+ битых URL × два адаптера на уровне конфига, `InvalidURL`/
+  `ValueError` на уровне запроса, отсутствующий ресурс, пустой транскрипт.
+
+**Осталось:** YouTube-адаптер (T-014) — `TypeError` вместо
+`YouTubeNetworkError`, таймаут, двойной `_extract_info`, кэш yt-dlp;
+`except (InvalidURL, ValueError)` в LLM/речи широк и ловит `ValueError`
+сериализации; `_media_type` кидает plain `ValueError` на неизвестный MIME.
+Это уже не «сырой `InvalidURL`», а границы того же контракта
+(`t013-review-issues.md`).
+
 
 Связанные: `t004-review-issues.md`, `t011-review-issues.md`,
 `t003-review-issues.md`, `cycle-12-spend.md`, `review-debt-accumulates.md`,

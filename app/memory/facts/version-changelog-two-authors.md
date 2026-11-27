@@ -123,3 +123,11 @@ CHANGELOG» остаётся, но предупреждение «HEAD снов�
 Связанные: `t004-review-issues.md`, `t007-review-issues.md` (пункт про
 неточную версию в CHANGELOG), `t009-review-issues.md`, `cycle-09-spend.md`,
 `cycle-08-spend.md`, `release-metadata` (скил).
+
+## Цикл 13
+
+T-013 метаданные не трогала; VERSION после LEARN поднимет 0.17.0 → 0.18.0 и
+даст одну запись CHANGELOG на одну задачу. Двух авторов снова не появилось:
+разработчик версию не менял, `bump_app_version` синхронизирует `__init__` и
+`pyproject`, гейты после bump — часть VERSION. Это ожидаемое изменение, а не
+дефект задачи (`release-metadata`).
