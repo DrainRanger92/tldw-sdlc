@@ -47,6 +47,7 @@ from tldw.handlers import (
     SummaryProcessor,
     TemplateHandler,
     TemplateParser,
+    find_link_handler,
 )
 from tldw.handlers.template import TemplateAction
 from tldw.services.note import Note
@@ -69,6 +70,17 @@ VIDEO_ID = "dQw4w9WgXcQ"
 VIDEO_TITLE = "Как учиться эффективно"
 VIDEO_CHANNEL = "Академия обучения"
 VIDEO_DURATION_SECONDS = 754
+
+
+def empty_env_file(tmp_path: Path) -> Path:
+    """Пустой ``.env`` для CLI-тестов: значения приходят из ``environ``.
+
+    Один помощник вместо копий в тестах CLI, точки входа и очистки логов:
+    явный ``--env-file`` не должен подмешивать реальный ``app/.env``.
+    """
+    path = tmp_path / "test.env"
+    path.write_text("", encoding="utf-8")
+    return path
 
 
 def parse_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
@@ -380,6 +392,7 @@ def make_harness(
     template_handler: TemplateHandler | None = None,
     session: FakeSession | None = None,
     template_service: TemplateService | None = None,
+    max_concurrent: int | None = None,
 ) -> Harness:
     """Собрать стенд с настоящими обработчиками и фейковой сессией.
 
@@ -393,10 +406,14 @@ def make_harness(
     router = Router(name="test-tldw")
     if template_handler is not None:
         template_handler.register(router)
+    handler_options: dict[str, Any] = {}
+    if max_concurrent is not None:
+        handler_options["max_concurrent"] = max_concurrent
     handler = LinkHandler(
         service,
         allowed_user_ids=allowed_user_ids,
         template_service=template_service,
+        **handler_options,
     )
     handler.register(router)
     dispatcher = Dispatcher()
@@ -531,10 +548,9 @@ class AppHarness:
 def _find_link_handler(dispatcher: Dispatcher) -> LinkHandler:
     """Найти обработчик ссылки среди message-обработчиков собранного роутера."""
     for router in dispatcher.sub_routers:
-        for registered in router.message.handlers:
-            owner = getattr(registered.callback, "__self__", None)
-            if isinstance(owner, LinkHandler):
-                return owner
+        handler = find_link_handler(router)
+        if handler is not None:
+            return handler
     raise AssertionError("build_application не зарегистрировал обработчик ссылки")
 
 
@@ -935,6 +951,7 @@ __all__ = [
     "VIDEO_URL",
     "app_harness",
     "build_app_harness",
+    "empty_env_file",
     "expected_numbering",
     "frontmatter_keys",
     "inline_buttons",

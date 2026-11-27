@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -700,3 +701,15 @@ def test_service_rejects_invalid_limits(
 def test_empty_url_is_rejected(service: SummaryService, url: object) -> None:
     with pytest.raises(ValueError):
         service.process(url)  # type: ignore[arg-type]
+
+
+def test_service_logs_safe_video_id(
+    service: SummaryService,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Инцидент в логе можно сопоставить с видео по безопасному id (T-016)."""
+    with caplog.at_level(logging.INFO, logger="tldw.services.summary"):
+        service.process(URL)
+
+    assert VIDEO_ID in caplog.text
+    assert URL not in caplog.text

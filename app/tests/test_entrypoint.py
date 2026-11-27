@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from support import empty_env_file
+
 from tldw.config import ALL_ENV_VARS
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -42,12 +44,6 @@ def _run_main(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[st
     )
 
 
-def _empty_env_file(tmp_path: Path) -> Path:
-    path = tmp_path / "test.env"
-    path.write_text("", encoding="utf-8")
-    return path
-
-
 def test_entrypoint_checks_config_with_fake_env(tmp_path: Path) -> None:
     env = _clean_env()
     env.update(
@@ -62,7 +58,7 @@ def test_entrypoint_checks_config_with_fake_env(tmp_path: Path) -> None:
     result = _run_main(
         "--check-config",
         "--env-file",
-        str(_empty_env_file(tmp_path)),
+        str(empty_env_file(tmp_path)),
         env=env,
     )
 
@@ -75,7 +71,7 @@ def test_entrypoint_without_env_exits_with_clear_message(tmp_path: Path) -> None
     result = _run_main(
         "--check-config",
         "--env-file",
-        str(_empty_env_file(tmp_path)),
+        str(empty_env_file(tmp_path)),
         env=_clean_env(),
     )
 

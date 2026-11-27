@@ -95,7 +95,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from tldw.access import AccessPolicy
+from tldw.access import AccessPolicy, DenialLogLimiter, warn_if_allowlist_missing
 from tldw.config import MAX_AUDIO_DURATION_SECONDS
 from tldw.errors import MESSAGE_AUDIO_TOO_LONG, MESSAGE_UNEXPECTED_TEMPLATE, log_failure
 from tldw.handlers.link import MESSAGE_ACCESS_DENIED, extract_first_url
@@ -399,7 +399,9 @@ class TemplateHandler:
     :param parser: разбор описания человеческим языком (реализация — LLM-адаптер).
     :param speech: распознавание речи (реализация — ``SpeechAdapter``);
         ``None`` — голосовой ввод не подключён, бот предлагает текст.
-    :param allowed_user_ids: allowlist из конфига; пустой кортеж — доступ всем.
+    :param allowed_user_ids: allowlist из конфига; пустой кортеж — доступ всем,
+        ``None`` (аргумент забыт) — тоже доступ всем, но с предупреждением в
+        лог, чтобы fail-open не был молчаливым (T-016).
 
     Порядок регистрации важен: команда и кнопка открывают сценарий в любом
     состоянии, затем идёт приём описания и голоса, затем callback. Обработчик
@@ -417,12 +419,17 @@ class TemplateHandler:
         parser: TemplateParser,
         *,
         speech: SpeechTranscriber | None = None,
-        allowed_user_ids: tuple[int, ...] = (),
+        allowed_user_ids: tuple[int, ...] | None = None,
     ) -> None:
         self._templates = templates
         self._parser = parser
         self._speech = speech
-        self._access = AccessPolicy(allowed_user_ids)
+        if allowed_user_ids is None:
+            warn_if_allowlist_missing()
+            self._access = AccessPolicy.open()
+        else:
+            self._access = AccessPolicy(allowed_user_ids)
+        self._denials = DenialLogLimiter()
 
     def register(self, router: Router) -> None:
         """Подключить обработчики к роутеру в порядке «вход → ввод → callback»."""
@@ -450,12 +457,11 @@ class TemplateHandler:
         """
         user_id = _sender_id(message)
         if user_id is None or not self._access.is_allowed(user_id):
-            _log_denied("показ", user_id)
-            await message.answer(MESSAGE_ACCESS_DENIED, parse_mode=None)
+            await self._deny(message, "показ", user_id)
             return
 
         await state.clear()
-        active = self._templates.get_active(user_id)
+        active = await self._active(user_id)
         log.info(
             "Шаблон: показан активный (%s, разделов: %s)",
             _origin_label(active),
@@ -487,8 +493,7 @@ class TemplateHandler:
         """
         user_id = _sender_id(message)
         if user_id is None or not self._access.is_allowed(user_id):
-            _log_denied("изменение", user_id)
-            await message.answer(MESSAGE_ACCESS_DENIED, parse_mode=None)
+            await self._deny(message, "изменение", user_id)
             return
 
         await self._present_description(
@@ -523,8 +528,7 @@ class TemplateHandler:
         """
         user_id = _sender_id(message)
         if user_id is None or not self._access.is_allowed(user_id):
-            _log_denied("голосовое описание", user_id)
-            await message.answer(MESSAGE_ACCESS_DENIED, parse_mode=None)
+            await self._deny(message, "голосовое описание", user_id)
             return
 
         current_state = await state.get_state()
@@ -572,7 +576,7 @@ class TemplateHandler:
             log_failure(
                 exc,
                 logger=log,
-                context=self._failure_context("скачивания голосового", user_id),
+                context=await self._failure_context("скачивания голосового", user_id),
                 unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await message.answer(
@@ -592,7 +596,7 @@ class TemplateHandler:
             report = log_failure(
                 exc,
                 logger=log,
-                context=self._failure_context("распознавания", user_id),
+                context=await self._failure_context("распознавания", user_id),
                 unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await message.answer(
@@ -668,7 +672,7 @@ class TemplateHandler:
             report = log_failure(
                 exc,
                 logger=log,
-                context=self._failure_context("разбора", user_id),
+                context=await self._failure_context("разбора", user_id),
                 unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await message.answer(
@@ -680,7 +684,7 @@ class TemplateHandler:
 
         await state.set_data({_DATA_CANDIDATE: _candidate_payload(candidate)})
         await state.set_state(TemplateStates.confirming_candidate)
-        active = self._templates.get_active(user_id)
+        active = await self._active(user_id)
         log.info(
             "Шаблон: показан кандидат (%s, разделов: %s)",
             _origin_label(active),
@@ -753,22 +757,58 @@ class TemplateHandler:
             tone=draft.tone,
         )
 
-    def _failure_context(self, stage: str, user_id: int) -> str:
+    async def _failure_context(self, stage: str, user_id: int) -> str:
         """Контекст записи о сбое: стадия, происхождение и число разделов.
 
         В лог попадает только пометка о шаблоне, поэтому запись говорит о
         шаблоне, а не о видео, и не раскрывает заголовки, тон и JSON. Если
         активный шаблон прочитать не удалось, остаётся короткая пометка без
-        подробностей — контекст не должен подменять исходный сбой.
+        подробностей — контекст не должен подменять исходный сбой. Чтение идёт
+        в рабочем потоке, как и остальные файловые операции T-016.
         """
         try:
-            active = self._templates.get_active(user_id)
+            active = await asyncio.to_thread(self._templates.get_active, user_id)
         except Exception:  # noqa: BLE001 - контекст не важнее исходной ошибки
             return f"{stage} шаблона"
         return (
             f"{stage} шаблона ({_origin_label(active)}, "
             f"разделов: {len(active.sections)})"
         )
+
+    async def _active(self, user_id: int) -> ActiveTemplate:
+        """Прочитать активный шаблон в рабочем потоке (файловый ввод-вывод)."""
+        return await asyncio.to_thread(self._templates.get_active, user_id)
+
+    async def _deny(self, message: Message, action: str, user_id: int | None) -> None:
+        """Записать отказ и ответить, не роняя обработчик сбоем Telegram."""
+        self._log_denied(action, user_id)
+        try:
+            await message.answer(MESSAGE_ACCESS_DENIED, parse_mode=None)
+        except Exception as exc:  # noqa: BLE001 - ответ не должен всплывать в aiogram
+            log_failure(exc, logger=log, context="ответа об отказе в доступе")
+
+    async def _deny_callback(
+        self,
+        callback: CallbackQuery,
+        action: str,
+        user_id: int | None,
+    ) -> None:
+        """То же для callback: всплывающее уведомление не роняет обработчик."""
+        self._log_denied(action, user_id)
+        try:
+            await callback.answer(MESSAGE_ACCESS_DENIED, show_alert=True)
+        except Exception as exc:  # noqa: BLE001 - ответ не должен всплывать в aiogram
+            log_failure(exc, logger=log, context="ответа об отказе в доступе")
+
+    def _log_denied(self, action: str, user_id: int | None) -> None:
+        """Записать отказ: первый раз ``WARNING``, повторы — ``DEBUG``."""
+        if user_id is None:
+            message = "Шаблон: доступ к действию «%s» закрыт, отправителя нет"
+            args: tuple[object, ...] = (action,)
+        else:
+            message = "Шаблон: доступ к действию «%s» закрыт, user ID %s нет в allowlist"
+            args = (action, user_id)
+        self._denials.log_denial(log, message, *args, user_id=user_id)
 
     async def handle_callback(
         self,
@@ -785,8 +825,7 @@ class TemplateHandler:
         """
         user_id = callback.from_user.id
         if not self._access.is_allowed(user_id):
-            _log_denied("кнопка", user_id)
-            await callback.answer(MESSAGE_ACCESS_DENIED, show_alert=True)
+            await self._deny_callback(callback, "кнопка", user_id)
             return
 
         await callback.answer()
@@ -853,14 +892,14 @@ class TemplateHandler:
             await self._show(callback, MESSAGE_STALE_CALLBACK, empty_keyboard())
             return
         try:
-            self._templates.reset(user_id)
+            await asyncio.to_thread(self._templates.reset, user_id)
         except Exception as exc:  # noqa: BLE001 - ошибка не должна всплывать в Telegram
             # Сброс не выполнен: пользователь не видит сообщения об успехе, а
             # прежний шаблон остаётся активным.
             report = log_failure(
                 exc,
                 logger=log,
-                context=self._failure_context("сброса", user_id),
+                context=await self._failure_context("сброса", user_id),
                 unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await state.clear()
@@ -869,7 +908,7 @@ class TemplateHandler:
 
         await state.clear()
         log.info("Шаблон: пользовательский сброшен, действует встроенный")
-        active = self._templates.get_active(user_id)
+        active = await self._active(user_id)
         await self._show(
             callback,
             f"{MESSAGE_RESET_DONE}\n\n{render_template_text(active)}",
@@ -889,14 +928,14 @@ class TemplateHandler:
             await self._show(callback, MESSAGE_STALE_CANDIDATE, empty_keyboard())
             return
         try:
-            self._templates.save(user_id, candidate)
+            await asyncio.to_thread(self._templates.save, user_id, candidate)
         except Exception as exc:  # noqa: BLE001 - ошибка не должна всплывать в Telegram
             # Активный шаблон остаётся прежним: кандидат не сохранён, состояние
             # и клавиатура сохраняются, чтобы попытку можно было повторить.
             report = log_failure(
                 exc,
                 logger=log,
-                context=self._failure_context("сохранения", user_id),
+                context=await self._failure_context("сохранения", user_id),
                 unknown_message=MESSAGE_UNEXPECTED_TEMPLATE,
             )
             await self._show(callback, report.user_message, candidate_keyboard())
@@ -904,7 +943,7 @@ class TemplateHandler:
 
         await state.clear()
         log.info("Шаблон: сохранён пользовательский (разделов: %s)", len(candidate.sections))
-        active = self._templates.get_active(user_id)
+        active = await self._active(user_id)
         await self._show(
             callback,
             f"{MESSAGE_SAVED}\n\n{render_template_text(active)}",
@@ -992,18 +1031,6 @@ def _sender_id(message: Message) -> int | None:
     """ID отправителя сообщения; ``None``, если отправителя нет (канал)."""
     user = message.from_user
     return user.id if user is not None else None
-
-
-def _log_denied(action: str, user_id: int | None) -> None:
-    """Записать отказ в лог, не раскрывая шаблон и текст сообщения."""
-    if user_id is None:
-        log.warning("Шаблон: доступ к действию «%s» закрыт, отправителя нет", action)
-    else:
-        log.warning(
-            "Шаблон: доступ к действию «%s» закрыт, user ID %s нет в allowlist",
-            action,
-            user_id,
-        )
 
 
 __all__ = [

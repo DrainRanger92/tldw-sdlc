@@ -935,3 +935,47 @@ def test_router_requires_both_template_dependencies() -> None:
 
     with pytest.raises(ValueError, match="template_service"):
         create_router(service, template_service=TemplateService(FakeTemplateRepository()))
+
+
+# --- T-016: чтение шаблона в корутине уходит в рабочий поток ----------------
+
+
+def test_template_view_reads_storage_in_worker_thread() -> None:
+    """``/template`` не делает файловый ввод-вывод в event loop (T-016)."""
+    load_threads: list[int] = []
+    loop_threads: list[int] = []
+
+    class RecordingRepository(FakeTemplateRepository):
+        def load(self, user_id: int) -> tuple[tuple[str, ...], str] | None:
+            load_threads.append(threading.get_ident())
+            return super().load(user_id)
+
+    async def send_template(stand) -> None:  # noqa: ANN001 - тип стенда в support
+        loop_threads.append(threading.get_ident())
+        await stand.send("/template")
+
+    run_template_scenario(send_template, repository=RecordingRepository())
+
+    assert loop_threads
+    assert load_threads
+    assert all(thread != loop_threads[0] for thread in load_threads)
+
+
+def test_repeated_template_denials_log_one_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Повторные отказы сценария шаблона не заливают WARNING (T-016)."""
+
+    async def scenario(stand) -> None:  # noqa: ANN001 - тип стенда в support
+        for _ in range(3):
+            await stand.send("/template", user_id=42)
+
+    with caplog.at_level(logging.WARNING, logger="tldw.handlers.template"):
+        run_template_scenario(scenario, allowed_user_ids=(1001,))
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "tldw.handlers.template" and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1

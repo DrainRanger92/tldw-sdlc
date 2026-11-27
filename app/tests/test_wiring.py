@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -375,3 +376,36 @@ def test_build_application_wires_both_handlers_with_defaults(
         assert settings.data_dir.is_dir()
     finally:
         asyncio.run(application.close())
+
+
+# --- T-016: забытый allowlist в проводке не молчит ---------------------------
+
+
+class _UnusedSummary:
+    def process(self, url: str, *, template: ActiveTemplate | None = None) -> SummaryResult:
+        raise AssertionError("сервис не должен вызываться")
+
+
+def test_create_router_without_allowlist_warns_but_keeps_mvp_access(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from tldw.access import MISSING_ALLOWLIST_WARNING
+
+    with caplog.at_level(logging.WARNING, logger="tldw.access"):
+        router = create_router(_UnusedSummary())
+
+    warnings = [record for record in caplog.records if record.name == "tldw.access"]
+    assert warnings
+    assert warnings[0].getMessage() == MISSING_ALLOWLIST_WARNING
+    # Забытый аргумент не запрещает доступ: обработчик собран и не отвергает
+    # сообщение (поведение проверяется в test_access.py).
+    assert registered_link_handler(router) is not None
+
+
+def test_create_router_with_explicit_empty_allowlist_does_not_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="tldw.access"):
+        create_router(_UnusedSummary(), allowed_user_ids=())
+
+    assert caplog.records == []

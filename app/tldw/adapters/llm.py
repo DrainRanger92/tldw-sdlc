@@ -517,9 +517,8 @@ class LLMClient:
                 if _is_retryable(response.status_code) and attempt < self.max_attempts:
                     delay = self.backoff_seconds * (2 ** (attempt - 1))
                     log.warning(
-                        "LLM: HTTP %s %s, повтор через %.1f с (попытка %s/%s)",
+                        "LLM: HTTP %s, повтор через %.1f с (попытка %s/%s)",
                         response.status_code,
-                        response.reason_phrase,
                         delay,
                         attempt,
                         self.max_attempts,
@@ -529,9 +528,8 @@ class LLMClient:
 
                 if response.status_code >= 400:
                     log.error(
-                        "LLM: провайдер ответил HTTP %s %s (попытка %s/%s)",
+                        "LLM: провайдер ответил HTTP %s (попытка %s/%s)",
                         response.status_code,
-                        response.reason_phrase,
                         attempt,
                         self.max_attempts,
                     )
@@ -725,15 +723,23 @@ def build_custom_system_prompt(sections: Sequence[str], tone: str = "") -> str:
 
 
 def build_user_prompt(transcript: str, *, title: str = "", channel: str = "") -> str:
-    """Собрать пользовательское сообщение: метаданные и транскрипт в маркерах."""
+    """Собрать пользовательское сообщение: метаданные и транскрипт в маркерах.
+
+    ``title``, ``channel`` и транскрипт — данные, а не инструкции. Название и
+    канал схлопываются в одну строку, а угловые скобки в них обезвреживаются
+    тем же :func:`_data_text`, что и в шаблоне: метаданные не могут закрыть
+    блок ``<transcript>`` и подменить промпт. В самом транскрипте нейтрализуются
+    только маркеры ``<transcript>``/``</transcript>`` — остальной текст
+    сохраняется, поэтому внедрение из субтитров не ломает структуру (T-016).
+    """
     header: list[str] = []
-    title_text = one_line(title)
-    channel_text = one_line(channel)
+    title_text = _data_text(one_line(title))
+    channel_text = _data_text(one_line(channel))
     if title_text:
         header.append(f"Название видео: {title_text}")
     if channel_text:
         header.append(f"Канал: {channel_text}")
-    body = transcript.strip()
+    body = _escape_transcript_markers(transcript.strip())
     if header:
         return "\n".join([*header, "", "<transcript>", body, "</transcript>"])
     return "\n".join(["<transcript>", body, "</transcript>"])
@@ -975,6 +981,20 @@ def _data_text(value: str) -> str:
     с ``</tone>`` не может закрыть блок данных и превратиться в инструкцию.
     """
     return value.replace("<", "‹").replace(">", "›")
+
+
+#: Маркер блока транскрипта в пользовательском сообщении.
+_TRANSCRIPT_MARKER_RE: Final = re.compile(r"(?i)<\s*/?\s*transcript\s*>")
+
+
+def _escape_transcript_markers(value: str) -> str:
+    """Обезвредить только маркеры ``<transcript>``/``</transcript>``.
+
+    Остальной текст транскрипта сохраняется: таймкоды, код и угловые скобки в
+    обычном тексте не меняются. Инъекция вида ``</transcript>…`` становится
+    данными и не может закрыть блок (T-016).
+    """
+    return _TRANSCRIPT_MARKER_RE.sub(lambda match: _data_text(match.group(0)), value)
 
 
 def _summary_sections(

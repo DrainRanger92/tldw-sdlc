@@ -5,8 +5,10 @@
 """
 
 from tldw.handlers.link import (
+    MAX_CONCURRENT_LINKS,
     MESSAGE_ACCEPTED,
     MESSAGE_ACCESS_DENIED,
+    MESSAGE_ALREADY_PROCESSING,
     MESSAGE_DONE,
     MESSAGE_NEED_LINK,
     MESSAGE_NO_FILE,
@@ -15,7 +17,7 @@ from tldw.handlers.link import (
     SummaryProcessor,
     extract_first_url,
 )
-from tldw.handlers.router import create_router
+from tldw.handlers.router import create_router, find_link_handler
 from tldw.handlers.template import (
     TEMPLATE_BUTTON_TEXT,
     SpeechTranscriber,
@@ -29,8 +31,10 @@ from tldw.handlers.template import (
 )
 
 __all__ = [
+    "MAX_CONCURRENT_LINKS",
     "MESSAGE_ACCESS_DENIED",
     "MESSAGE_ACCEPTED",
+    "MESSAGE_ALREADY_PROCESSING",
     "MESSAGE_DONE",
     "MESSAGE_NEED_LINK",
     "MESSAGE_NO_FILE",
@@ -45,6 +49,7 @@ __all__ = [
     "TemplateStates",
     "create_router",
     "extract_first_url",
+    "find_link_handler",
     "main_keyboard",
     "render_candidate_text",
     "render_template_text",

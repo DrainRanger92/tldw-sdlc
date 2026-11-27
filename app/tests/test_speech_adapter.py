@@ -584,3 +584,22 @@ def test_unconfigured_adapter_reports_not_configured_before_too_long() -> None:
 def test_invalid_timeout_is_rejected(timeout: float) -> None:
     with pytest.raises(ValueError, match="timeout"):
         SpeechAdapter(api_key=FAKE_API_KEY, model=MODEL, base_url=BASE_URL, timeout=timeout)
+
+
+def test_http_error_log_contains_no_reason_phrase(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Лог HTTP-ошибки — только код, без серверного reason_phrase (T-016)."""
+    response = httpx.Response(418, text="private server text")
+    _requests, transport = recording_transport(response)
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="tldw.adapters.speech"),
+        pytest.raises(SpeechProviderError),
+    ):
+        make_adapter(transport).transcribe(AUDIO, duration_seconds=5)
+
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "418" in logged
+    assert "I'm a Teapot" not in logged
+    assert "private server text" not in logged

@@ -270,11 +270,9 @@ class SpeechAdapter:
                 raise SpeechProviderError() from exc
 
         if response.status_code >= 400:
-            log.error(
-                "Речь: сервис ответил HTTP %s %s",
-                response.status_code,
-                response.reason_phrase,
-            )
+            # Только код ответа: reason_phrase и тело ответа — серверный текст,
+            # он не должен попадать в лог (T-016).
+            log.error("Речь: сервис ответил HTTP %s", response.status_code)
             raise SpeechProviderError()
 
         text = _transcript_text(response)

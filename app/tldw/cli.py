@@ -24,6 +24,7 @@ from tldw.config import (
     load_env_file,
     load_settings,
 )
+from tldw.errors import sanitize_log_text
 from tldw.logging_setup import configure_logging
 
 log = logging.getLogger(__name__)
@@ -74,6 +75,23 @@ def _run_application(application: Application) -> None:
     application.run()
 
 
+def _close_application(application: Application) -> Exception | None:
+    """Закрыть приложение на пути остановки, не выпуская исключение наружу.
+
+    ``run_polling(close_bot_session=True)`` уже мог закрыть сессию Telegram, а
+    ``asyncio.run`` создаёт новый event loop — повторное закрытие в этом
+    окружении может упасть ошибкой aiohttp. Такая ошибка не должна вылетать из
+    :func:`main` вместо кода возврата и не должна подменять ``EXIT_FAILURE``
+    (REVIEW-2 T-016), поэтому причина возвращается вызывающему: он решает,
+    писать её в stderr или только в лог (очистка секретов — на нём).
+    """
+    try:
+        asyncio.run(application.close())
+    except Exception as exc:  # noqa: BLE001 - остановка не должна падать трейсбеком
+        return exc
+    return None
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -101,15 +119,28 @@ def main(
         application = build_application(settings)
     except Exception as exc:  # noqa: BLE001 - на старте любая ошибка должна быть понятной
         log.exception("Не удалось собрать приложение")
+        # В stderr тоже не должно быть секретов: текст исключения может
+        # содержать URL с токеном, ключ или транскрипт (P2 T-008).
         print(
-            f"Не удалось запустить TLDW: {type(exc).__name__}: {exc}",
+            f"Не удалось запустить TLDW: {type(exc).__name__}: {sanitize_log_text(exc)}",
             file=sys.stderr,
         )
         print(CONFIG_HINT, file=sys.stderr)
         return EXIT_FAILURE
 
     if args.check_config:
-        asyncio.run(application.close())
+        close_error = _close_application(application)
+        if close_error is not None:
+            log.warning(
+                "Остановка: не удалось закрыть приложение (%s)",
+                type(close_error).__name__,
+            )
+            print(
+                "Не удалось корректно остановить TLDW: "
+                f"{type(close_error).__name__}: {sanitize_log_text(close_error)}",
+                file=sys.stderr,
+            )
+            return EXIT_FAILURE
         print(
             "Конфигурация в порядке: приложение собрано "
             f"(модель LLM: {settings.llm_model}, "
@@ -133,8 +164,17 @@ def main(
         log.exception("Приложение остановлено из-за ошибки")
         return EXIT_FAILURE
     finally:
-        if run_application is not None:
-            asyncio.run(application.close())
+        # Закрываем приложение на любом пути остановки — и после штатного
+        # ``application.run()``, и после подменённого runner (T-016). Иначе в
+        # проде фоновые задачи не отменялись, а сессия Telegram не закрывалась.
+        # Сбой закрытия гасим: он не должен подменять уже выбранный код
+        # возврата (REVIEW-2 T-016).
+        close_error = _close_application(application)
+        if close_error is not None:
+            log.warning(
+                "Остановка: не удалось закрыть приложение (%s)",
+                type(close_error).__name__,
+            )
     return EXIT_OK
 
 

@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from tldw.access import unique_user_ids
+
 APP_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_ENV_FILE = APP_DIR / ".env"
 DEFAULT_DATA_DIR = APP_DIR / "data"
@@ -247,9 +249,10 @@ def _parse_allowed_user_ids(raw: str | None) -> tuple[int, ...]:
             raise ConfigError(
                 f"{ENV_TELEGRAM_ALLOWED_USER_IDS}: user ID должен быть положительным."
             )
-        if user_id not in ids:
-            ids.append(user_id)
-    return tuple(ids)
+        ids.append(user_id)
+    # Дедупликация — одно правило на приложение (tldw.access), а не вторая
+    # копия здесь: AccessPolicy применяет ту же функцию.
+    return unique_user_ids(ids)
 
 
 def _parse_int(raw: str | None, name: str, *, default: int, minimum: int) -> int:

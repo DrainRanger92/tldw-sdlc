@@ -16,7 +16,7 @@ from tldw.bootstrap import (
     build_speech_transcriber,
 )
 from tldw.config import load_settings
-from tldw.handlers import create_router
+from tldw.handlers import MESSAGE_DONE, create_router
 from tldw.storage import ensure_data_dir
 
 
@@ -171,7 +171,11 @@ def test_empty_allowlist_logs_open_access_warning(
     with caplog.at_level(logging.WARNING, logger="tldw.access"):
         application = build_application(settings)
     try:
-        warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "tldw.access" and record.levelno == logging.WARNING
+        ]
     finally:
         asyncio.run(application.close())
 
@@ -189,8 +193,88 @@ def test_configured_allowlist_logs_no_warning(
     with caplog.at_level(logging.WARNING, logger="tldw.access"):
         application = build_application(settings, summary_service=_UnusedService())
     try:
-        warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "tldw.access" and record.levelno == logging.WARNING
+        ]
     finally:
         asyncio.run(application.close())
 
     assert warnings == []
+
+
+# --- T-016: порядок сборки и отмена фоновых задач при остановке -------------
+
+
+def test_data_dir_is_created_before_bot(
+    fake_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Если каталог данных недоступен, Bot ещё не создан (закрывать нечего)."""
+    created: list[object] = []
+
+    def broken_ensure_data_dir(path: Path) -> Path:
+        raise OSError("каталог данных недоступен")
+
+    def recording_bot(**kwargs: object) -> object:
+        created.append(kwargs)
+        raise AssertionError("Bot не должен создаваться после ошибки каталога")
+
+    monkeypatch.setattr("tldw.bootstrap.ensure_data_dir", broken_ensure_data_dir)
+    monkeypatch.setattr("tldw.bootstrap.Bot", recording_bot)
+
+    with pytest.raises(OSError, match="каталог данных недоступен"):
+        build_application(load_settings(fake_env))
+
+    assert created == []
+
+
+class _BlockingService:
+    """Сервис, который висит в рабочем потоке до release: имитация долгой LLM."""
+
+    def __init__(self, result: object, started: object, release: object) -> None:
+        self.result = result
+        self.started = started
+        self.release = release
+        self.calls: list[str] = []
+
+    def process(self, url: str, *, template: object | None = None) -> object:
+        self.calls.append(url)
+        self.started.set()  # type: ignore[attr-defined]
+        self.release.wait(5)  # type: ignore[attr-defined]
+        return self.result
+
+
+def test_application_close_cancels_background_tasks(
+    fake_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """Остановка отменяет обработку и не пишет «готово» в закрытую сессию."""
+    import threading
+
+    from aiogram.methods import SendMessage
+    from support import VIDEO_URL, app_harness, make_result
+
+    started = threading.Event()
+    release = threading.Event()
+    service = _BlockingService(make_result(tmp_path), started, release)
+
+    async def scenario() -> list[str]:
+        settings = load_settings(fake_env)
+        async with app_harness(settings, summary_service=service) as application:
+            await application.send(VIDEO_URL)
+            assert await asyncio.to_thread(started.wait, 5), "обработка не стартовала"
+            await application.application.close()
+            release.set()
+            await asyncio.sleep(0.05)
+            return [
+                request.text
+                for request in application.requests
+                if isinstance(request, SendMessage)
+            ]
+
+    texts = asyncio.run(scenario())
+
+    assert MESSAGE_DONE not in texts, "«готово» не должно уходить после закрытия"
+    assert service.calls == [VIDEO_URL]

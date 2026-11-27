@@ -15,8 +15,9 @@
   :data:`MESSAGE_UNEXPECTED`, а в лог на уровне ``ERROR`` пишется стектрейс;
 - любая запись в лог проходит через :func:`sanitize_log_text`: вырезаются
   токены и ключи API (включая ``Authorization: Bearer`` и значения переменных
-  вида ``LLM_API_KEY=…``), а длинные фрагменты ограничиваются, поэтому полный
-  транскрипт в лог не попадает;
+  вида ``LLM_API_KEY=…``), URL сводится к схеме и host без пути и query, а
+  длинные фрагменты ограничиваются, поэтому полный транскрипт и полный URL в
+  лог не попадают;
 - у записи есть необязательный **контекст**: по умолчанию это «обработки
   видео» (прежний текст цикла T-008), а сценарий шаблона передаёт «разбора
   шаблона (пользовательский, разделов: 2)», поэтому сбой говорит о шаблоне, а
@@ -79,23 +80,40 @@ _TRACEBACK_HEADER: Final = "Traceback (most recent call last)"
 _FRAME_PREFIX: Final = '  File "'
 #: Отступ строк-исходников кадра; у сообщения исключения бывает такой же.
 _FRAME_BODY_INDENT: Final = "    "
-#: Сколько строк после кадра относятся к нему: исходник и (3.11+) каретка.
-_MAX_FRAME_BODY_LINES: Final = 2
 #: Начало разделителя цепочки исключений (``raise … from …``, «во время обработки»).
 _EXCEPTION_CHAIN_PREFIXES: Final = (
     "During handling of the above exception",
     "The above exception was the direct cause",
 )
+#: Предел вложенности ``ExceptionGroup``: защита от рекурсивного обхода.
+MAX_EXCEPTION_GROUP_DEPTH: Final = 8
 
 #: Шаблоны секретов: (регулярное выражение, замена).
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Значения переменных окружения и заголовков: LLM_API_KEY=…, Authorization: ….
-    # Схема авторизации входит в значение: иначе ``\S+`` съел бы только слово
-    # «Bearer», а сам токен остался бы в тексте (формат ``adapters/llm.py``).
+    # Переменные окружения: секретное слово стоит **внутри** имени, а не только
+    # в конце. Хвост ``[A-Za-z0-9_]*`` после ключевого слова возвращает имена с
+    # суффиксом (``SECRET_KEY``, ``AWS_SECRET_ACCESS_KEY``, ``PASSWORD_HASH``,
+    # ``ACCESS_TOKEN_HASH``) — без него сужение шаблона открыло регресс
+    # (REVIEW-2 T-016). Регистр не важен, иначе ``llm_api_key=…``/
+    # ``db_password=…`` оставались в логе. Единственное исключение — счётчики
+    # ``*_TOKENS``: ``TOKEN(?!S)`` не совпадает с ``max_tokens``/
+    # ``MAX_OUTPUT_TOKENS``, потому что это лимит ответа, а не секрет (P3 T-008).
     (
         re.compile(
-            r"(?i)\b([A-Z0-9_]*(?:TOKEN|API_KEY|APIKEY|SECRET|PASSWORD|AUTHORIZATION)[A-Z0-9_]*)"
-            r"\s*[=:]\s*(?:(?:bearer|basic|token)\s+)?\S+"
+            r"\b((?:[A-Za-z_][A-Za-z0-9_]*?)?(?:TOKEN(?!S)|API_?KEY|SECRET|PASSWORD|"
+            r"AUTHORIZATION)[A-Za-z0-9_]*)\s*[=:]\s*(?:(?:bearer|basic|token)\s+)?\S+",
+            re.IGNORECASE,
+        ),
+        rf"\1={REDACTED}",
+    ),
+    # Заголовки и ключи в любом регистре: ``x-api-key``, ``access_token``.
+    # Граница слова не даёт совпасть с ``max_tokens``: перед «token» в нём
+    # стоит подчёркивание, а после — буква.
+    (
+        re.compile(
+            r"(?i)\b(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|"
+            r"client[-_]?secret|secret|password|token)\s*[=:]\s*"
+            r"(?:(?:bearer|basic|token)\s+)?\S+"
         ),
         rf"\1={REDACTED}",
     ),
@@ -107,6 +125,13 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\d{6,}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"), REDACTED),
     # Ключи в стиле OpenAI/DeepSeek.
     (re.compile(r"\bsk-[A-Za-z0-9_-]{10,}\b"), REDACTED),
+    # URL в тексте исключения: остаётся только схема и host, путь/query/фрагмент
+    # вырезаются. Иначе полный URL с приватным ``si=`` или токеном в query
+    # попадал в лог через ``str(exc)`` (P3 T-006/T-016).
+    (
+        re.compile(r"(?i)\b(https?://[^\s<>\"'/?#]+)(?:[/?#][^\s<>\"']*)?"),
+        r"\1",
+    ),
 )
 
 
@@ -217,17 +242,38 @@ def log_failure(
     """
     report = describe_error(exc, context=context, unknown_message=unknown_message)
     target = log if logger is None else logger
+    # Известные ошибки пишутся на WARNING, но при LOG_LEVEL=ERROR этот уровень
+    # был бы отброшен и причина исчезла бы из лога. Поэтому уровень поднимается
+    # до действующего порога, если он выше: запись остаётся видимой (T-016).
+    level = _visible_level(target, report.level)
     if report.traceback_text is None:
-        target.log(report.level, "Сбой %s: %s", report.context, report.reason)
+        target.log(level, "Сбой %s: %s", report.context, report.reason)
     else:
         target.log(
-            report.level,
+            level,
             "Неизвестный сбой %s: %s\n%s",
             report.context,
             report.reason,
             report.traceback_text,
         )
     return report
+
+
+def _visible_level(logger: logging.Logger, level: int) -> int:
+    """Поднять уровень записи до порога логгера, чтобы она не потерялась.
+
+    Принятый компромисс (REVIEW-2 T-016): известная пользовательская ошибка при
+    ``LOG_LEVEL=ERROR`` пишется как ``ERROR``/``CRITICAL`` и поэтому неотличима
+    от настоящего инцидента по уровню — алерты и метрики увидят её наравне с
+    неизвестным сбоем. Альтернатива хуже: без подъёма уровня причина известной
+    ошибки исчезала из лога совсем, и разбор обращения становился невозможен.
+    Отличить её от инцидента можно по тексту записи: у известной ошибки нет
+    стектрейса и есть «Сбой …», у неизвестной — «Неизвестный сбой …» со стеком.
+    """
+    effective = logger.getEffectiveLevel()
+    if effective <= level:
+        return level
+    return min(effective, logging.CRITICAL)
 
 
 def format_context(context: str | None) -> str:
@@ -267,13 +313,28 @@ def format_reason(exc: BaseException) -> str:
 def format_traceback(exc: BaseException) -> str:
     """Отформатировать стектрейс, вырезав секреты и длинные фрагменты.
 
-    Кадры стека и их строки-исходники сохраняются, а всё остальное — текст
-    исключения (в том числе многострочный) — схлопывается в одну очищенную
-    строку. Кадром считается только строка ``  File "…"`` внутри блока
-    ``Traceback …`` и следующие за ней строки-исходники: отступ в четыре
-    пробела сам по себе признаком кадра не является, поэтому транскрипт с
-    отступами не уходит в лог целиком, а причина остаётся видимой.
+    Кадры стека и их строки-исходники сохраняются (включая длинные кадры
+    Python 3.11+ с кареткой и многострочным исходником), а всё остальное —
+    текст исключения (в том числе многострочный) — схлопывается в одну
+    очищенную строку. Кадром считается только строка ``  File "…"`` внутри
+    блока ``Traceback …``; отступ в четыре пробела сам по себе признаком кадра
+    не является, поэтому транскрипт с отступами не уходит в лог целиком, а
+    причина остаётся видимой.
+
+    ``ExceptionGroup`` (Python 3.11+) раньше схлопывался в одну строку и терял
+    вложенные исключения. Теперь группа сериализуется деревом: заголовок
+    группы и каждый элемент со своим стектрейсом и причиной. Это сохраняет
+    структуру и не смешивает разные сбои в одну запись (T-016).
     """
+    if isinstance(exc, BaseExceptionGroup):
+        text = _format_exception_group(exc, depth=0)
+    else:
+        text = _format_single_traceback(exc)
+    return _truncate_traceback(text)
+
+
+def _format_single_traceback(exc: BaseException) -> str:
+    """Стектрейс одного (не группового) исключения."""
     lines: list[str] = []
     message_parts: list[str] = []
 
@@ -283,30 +344,69 @@ def format_traceback(exc: BaseException) -> str:
             message_parts.clear()
 
     in_frames = False
-    frame_body_left = 0
+    in_frame_body = False
     for line in "".join(traceback.format_exception(exc)).splitlines():
         if line.startswith(_TRACEBACK_HEADER):
             flush_message()
-            in_frames, frame_body_left = True, 0
+            in_frames, in_frame_body = True, False
             lines.append(_sanitize_traceback_line(line))
         elif in_frames and line.startswith(_FRAME_PREFIX):
             flush_message()
-            frame_body_left = _MAX_FRAME_BODY_LINES
+            in_frame_body = True
             lines.append(_sanitize_traceback_line(line))
-        elif frame_body_left > 0 and line.startswith(_FRAME_BODY_INDENT):
+        elif in_frame_body and line.startswith(_FRAME_BODY_INDENT):
+            # Длинный кадр: сохраняем все строки исходника и каретку, а не
+            # только первые две — иначе многострочное выражение терялось.
             flush_message()
-            frame_body_left -= 1
             lines.append(_sanitize_traceback_line(line))
         elif line.startswith(_EXCEPTION_CHAIN_PREFIXES):
             flush_message()
-            in_frames, frame_body_left = False, 0
+            in_frames, in_frame_body = False, False
             lines.append(_sanitize_traceback_line(line))
         else:
-            in_frames, frame_body_left = False, 0
+            in_frames, in_frame_body = False, False
             message_parts.append(line)
     flush_message()
 
-    text = "\n".join(lines).strip()
+    return "\n".join(lines).strip()
+
+
+def _format_exception_group(
+    group: BaseExceptionGroup,
+    *,
+    depth: int,
+) -> str:
+    """Сериализовать ``ExceptionGroup`` деревом, не теряя вложенные ошибки."""
+    indent = "  " * depth
+    lines = [f"{indent}Exception Group Traceback (most recent call last):"]
+    # Внешние кадры места, где группа была поднята: их не видно в тексте
+    # вложенных исключений, но без них инцидент не сопоставить с кодом.
+    for chunk in traceback.format_tb(group.__traceback__):
+        lines.extend(
+            f"{indent}{_sanitize_traceback_line(line)}"
+            for line in chunk.splitlines()
+        )
+    lines.append(f"{indent}ExceptionGroup: {sanitize_log_text(str(group))}")
+    if depth >= MAX_EXCEPTION_GROUP_DEPTH:
+        lines.append(f"{indent}… [вложенность групп обрезана]")
+        return "\n".join(lines)
+    for index, sub_error in enumerate(group.exceptions, start=1):
+        lines.append(f"{indent}+- {index} ----------------")
+        if isinstance(sub_error, BaseExceptionGroup):
+            lines.append(_format_exception_group(sub_error, depth=depth + 1))
+        else:
+            body = _format_single_traceback(sub_error)
+            prefix = f"{indent}  | "
+            lines.extend(
+                f"{prefix}{line}" if line else prefix.rstrip()
+                for line in body.splitlines()
+            )
+    return "\n".join(lines)
+
+
+def _truncate_traceback(text: str) -> str:
+    """Ограничить длину итогового стектрейса явным маркером."""
+    text = text.strip()
     if len(text) > MAX_TRACEBACK_CHARS:
         text = f"{text[:MAX_TRACEBACK_CHARS].rstrip()}\n… [стектрейс обрезан]"
     return text
@@ -322,6 +422,31 @@ def sanitize_log_text(value: object, *, max_length: int = MAX_LOG_FIELD_CHARS) -
     text = _condense(str(value))
     if max_length > 0 and len(text) > max_length:
         text = f"{text[:max_length].rstrip()}… [фрагмент обрезан]"
+    return text
+
+
+def sanitize_log_block(
+    value: object,
+    *,
+    max_length: int = MAX_TRACEBACK_CHARS,
+    max_line_length: int = MAX_TRACEBACK_LINE_CHARS,
+) -> str:
+    """Очистить многострочный блок лога, сохранив строки и структуру.
+
+    Используется централизованным фильтром логирования: стектрейс или
+    многострочная запись остаются построчными (иначе нечитаемы), но каждый
+    секрет вырезается, длина строки и всего блока ограничены. Поэтому даже
+    сторонний логгер с полным транскриптом не запишет его целиком.
+    """
+    lines: list[str] = []
+    for raw_line in str(value).splitlines():
+        line = _redact(raw_line.rstrip())
+        if len(line) > max_line_length:
+            line = f"{line[:max_line_length].rstrip()}… [фрагмент обрезан]"
+        lines.append(line)
+    text = "\n".join(lines).strip()
+    if max_length > 0 and len(text) > max_length:
+        text = f"{text[:max_length].rstrip()}\n… [блок обрезан]"
     return text
 
 
@@ -349,6 +474,7 @@ __all__ = [
     "DEFAULT_FAILURE_CONTEXT",
     "ErrorReport",
     "MAX_CONTEXT_CHARS",
+    "MAX_EXCEPTION_GROUP_DEPTH",
     "MAX_LOG_FIELD_CHARS",
     "MAX_TRACEBACK_CHARS",
     "MAX_TRACEBACK_LINE_CHARS",
@@ -366,5 +492,6 @@ __all__ = [
     "format_traceback",
     "log_failure",
     "safe_user_message",
+    "sanitize_log_block",
     "sanitize_log_text",
 ]

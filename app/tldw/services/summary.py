@@ -317,13 +317,16 @@ class SummaryService:
         # разные `source` и URL запроса (P2 T-005).
         clean_url = url.strip()
         snapshot = _template_snapshot(template)
+
+        video = self._video_source.fetch(clean_url)
+        # Одна запись на запрос: безопасный video_id позволяет сопоставить
+        # инцидент с видео, не записывая полный URL с query (P3 T-008/T-016).
         log.info(
-            "Конспект: шаблон %s, разделов: %s",
+            "Конспект: видео %s, шаблон %s, разделов: %s",
+            video.metadata.video_id or "—",
             TEMPLATE_ORIGIN_LABELS[snapshot.origin],
             len(snapshot.sections),
         )
-
-        video = self._video_source.fetch(clean_url)
         self._ensure_duration(video)
         material = join_transcript(video.transcript, max_chars=self._max_transcript_chars)
         if material.is_empty:
@@ -364,8 +367,9 @@ class SummaryService:
         filename = note_filename(note)
         path = save_note(self._data_dir, filename, markdown) if self._data_dir is not None else None
         log.info(
-            "Конспект готов: %s (%s символов, %s сегментов)",
+            "Конспект готов: %s, video_id %s (%s символов, %s сегментов)",
             filename,
+            video.metadata.video_id or "—",
             len(markdown),
             material.used_segments,
         )

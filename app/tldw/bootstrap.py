@@ -40,10 +40,12 @@ from aiogram.enums import ParseMode
 from tldw.access import describe_allowlist, warn_if_open_access
 from tldw.config import Settings
 from tldw.handlers import (
+    LinkHandler,
     SpeechTranscriber,
     SummaryProcessor,
     TemplateParser,
     create_router,
+    find_link_handler,
 )
 from tldw.services.summary import SummaryProvider, SummaryService
 from tldw.services.template import TemplateService
@@ -57,18 +59,26 @@ log = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class Application:
-    """Собранное приложение: настройки, бот и диспетчер."""
+    """Собранное приложение: настройки, бот, диспетчер и фоновые задачи."""
 
     settings: Settings
     bot: Bot
     dispatcher: Dispatcher
+    link_handler: LinkHandler | None = None
 
     def run(self) -> None:
         """Запустить получение апдейтов Telegram (блокирующий вызов)."""
         self.dispatcher.run_polling(self.bot)
 
     async def close(self) -> None:
-        """Закрыть сетевые ресурсы бота."""
+        """Остановить фоновые задачи и закрыть сетевые ресурсы бота.
+
+        Сначала отменяются и дожидаются задачи обработчика ссылок (T-016):
+        иначе задача в полёте могла отправить «готово» в уже закрытую сессию,
+        а заметка — потеряться в середине отправки. Повторный вызов безопасен.
+        """
+        if self.link_handler is not None:
+            await self.link_handler.aclose()
         await self.bot.session.close()
 
 
@@ -149,6 +159,9 @@ def build_application(
     :raises OSError: если каталог данных из конфига нельзя создать.
     """
     warn_if_open_access(settings.allowed_user_ids)
+    # Каталог данных создаётся до Bot: если путь недоступен, бот ещё не создан
+    # и его сессию не нужно закрывать при ошибке сборки (T-016).
+    ensure_data_dir(settings.data_dir)
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -176,23 +189,26 @@ def build_application(
         if speech_transcriber is not None
         else build_speech_transcriber(settings)
     )
-    dispatcher.include_router(
-        create_router(
-            service,
-            allowed_user_ids=settings.allowed_user_ids,
-            template_service=templates,
-            template_parser=parser,
-            speech_transcriber=speech,
-        )
+    router = create_router(
+        service,
+        allowed_user_ids=settings.allowed_user_ids,
+        template_service=templates,
+        template_parser=parser,
+        speech_transcriber=speech,
     )
-    ensure_data_dir(settings.data_dir)
+    dispatcher.include_router(router)
     log.debug(
         "Приложение собрано: модель LLM %s, доступ: %s, голосовой ввод: %s",
         settings.llm_model,
         describe_allowlist(settings.allowed_user_ids),
         "включён" if speech.is_configured else "выключен",
     )
-    return Application(settings=settings, bot=bot, dispatcher=dispatcher)
+    return Application(
+        settings=settings,
+        bot=bot,
+        dispatcher=dispatcher,
+        link_handler=find_link_handler(router),
+    )
 
 
 __all__ = [

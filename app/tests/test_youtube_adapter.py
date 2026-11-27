@@ -287,6 +287,14 @@ def test_parse_video_id_rejects_non_youtube_links(url: str) -> None:
         parse_video_id(url)
 
 
+def test_parse_video_id_preserves_cause_for_malformed_url() -> None:
+    """Битый URL остаётся typed-ошибкой, но с цепочкой ``from exc`` (P3 T-016)."""
+    with pytest.raises(NotYouTubeURLError) as excinfo:
+        parse_video_id("https://[broken/watch?v=dQw4w9WgXcQ")
+
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
 def test_error_classes_are_typed_and_distinct() -> None:
     assert issubclass(NotYouTubeURLError, YouTubeAdapterError)
     assert issubclass(NoTranscriptError, YouTubeAdapterError)

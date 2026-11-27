@@ -30,8 +30,10 @@ README, минус переписанные кейсы обработчика); 
 (92 кейса, было 47); в T-015 — **25 нетто** в 13 существующих файлах,
 новых файлов нет (заголовки-ловушки в `test_llm_template.py`, DEBUG/WARNING
 в `test_storage_templates.py`, сквозной рендер в `test_summary_templates.py`,
-симметрия голоса/текста в `test_voice_handler.py`). Всего в наборе
-**1081 тест** в 28 файлах.
+симметрия голоса/текста в `test_voice_handler.py`). В T-016 — **22 нетто**
+в 14 файлах и один новый файл `test_logging_setup.py` (секреты-ловушки на
+путях сборки/остановки, сторонний логгер, многострочный стектрейс,
+`--check-config`). Всего в наборе **1144 теста** в 32 файлах.
 
 ## Когда применять
 
@@ -398,10 +400,11 @@ cd app
 Тесты без файловых операций (как `test_youtube_adapter.py`,
 `test_llm_adapter.py`, `test_access.py`, `test_errors.py` и `test_readme.py`)
 не используют `tmp_path` и потому проходят даже в read-only песочнице
-ревьюера. После T-015 полный набор — **1081 тест в 28 файлах**; новых
-файлов нет — 25 кейсов добавлены в существующие, включая файловые
-`test_storage_templates.py`/`test_summary_templates.py` и сценарный
-`test_voice_handler.py`. Файлы адаптеров (включая `test_speech_adapter.py` —
+ревьюера. После T-016 полный набор — **1144 теста в 32 файлах**; новый файл —
+`test_logging_setup.py` (+156), остальные 22 кейса добавлены в 13
+существующих файлов, включая файловые `test_storage_templates.py`/
+`test_summary_templates.py`, сценарный `test_voice_handler.py` (+349 в
+`test_link_handler.py`) и `test_errors.py` (+169). Файлы адаптеров (включая `test_speech_adapter.py` —
 80 кейсов, `test_llm_adapter.py` — 68, `test_youtube_adapter.py` — 92),
 `test_access.py`, `test_errors.py`, `test_readme.py`, `test_template.py`,
 `test_template_parser.py`, `test_template_handler.py` (30 сценариев FSM) и
@@ -424,7 +427,10 @@ env-errors из 1011 (74,5 %)**, `test_llm_adapter.py` 68/68 и
 env-errors из 1056 (75,5 %)**, `test_youtube_adapter.py` — 91 из 92, «кэш
 ничего не пишет» не исполнялся; **в цикле 15 — 0 из 1081**: read-only
 сессия не нашла writable temp-каталог, pytest упал до сбора, `ruff` прошёл
-дважды, зелёность принята по арифметике 1056 + 25, LEARN прогнал 1081.
+дважды, зелёность принята по арифметике 1056 + 25, LEARN прогнал 1081;
+**в цикле 16 — 0 из 1144 в обоих проходах**: оба раза `ISSUES` с пометкой
+«гейт не подтверждён», дефекты воспроизведены `python -c` в памяти,
+`ruff` прошёл дважды, LEARN перепроверил 1144 collected/passed.
 Поэтому сценарные кейсы, которым
 нужен `tmp_path`, оставляйте гейту VERIFY, а в read-only проверяйте чистые
 функции и не-файловые ветки.
@@ -461,6 +467,10 @@ env-errors из 1056 (75,5 %)**, `test_youtube_adapter.py` — 91 из 92, «к�
   таймаут-сессия, один `extract_info`, 1056 тестов.
 - `app/memory/facts/cycle-15-spend.md` — 25 новых кейсов в 13 файлах,
   заголовки-ловушки, DEBUG/WARNING, сквозной рендер, 1081 тест.
+- `app/memory/facts/cycle-16-spend.md` — 22 новых кейса, файл
+  `test_logging_setup.py`, 1144 теста; оба ревью без pytest.
+- `app/skills/log-sanitization/SKILL.md` — тесты-ловушки редактора
+  секретов в обе стороны.
 - `app/memory/facts/reviewer-readonly-tests.md` — почему в цикле 15
   ревьюер не смог прогнать ни одного теста и как это компенсировал LEARN.
 - `app/memory/facts/t014-review-issues.md` — P3 тестов T-014: узкий

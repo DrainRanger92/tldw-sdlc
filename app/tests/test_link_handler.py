@@ -21,11 +21,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -42,6 +44,7 @@ from support import (
     make_harness,
     make_result,
     make_summary,
+    make_update,
     make_video,
     request_types,
     run_message,
@@ -59,10 +62,12 @@ from tldw.errors import MESSAGE_UNEXPECTED, REDACTED
 from tldw.handlers import (
     MESSAGE_ACCEPTED,
     MESSAGE_ACCESS_DENIED,
+    MESSAGE_ALREADY_PROCESSING,
     MESSAGE_DONE,
     MESSAGE_NEED_LINK,
     MESSAGE_NO_FILE,
     MESSAGE_PROCESSING,
+    LinkHandler,
     create_router,
     extract_first_url,
 )
@@ -833,3 +838,347 @@ def test_template_stays_active_for_next_links_until_changed_or_reset(
     assert "## TL;DR" not in first_markdown
     assert first_source.calls == [VIDEO_URL]
     assert fourth_path != first_path
+
+
+# --- T-016: граница ссылки, безопасный лог, отказы, дедупликация и лимит ----
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("notyoutube.com/watch?v=dQw4w9WgXcQ", None),
+        ("abcyoutube.com/watch?v=dQw4w9WgXcQ", None),
+        ("not_youtube.com/watch?v=dQw4w9WgXcQ", None),
+        ("foo_youtu.be/dQw4w9WgXcQ", None),
+        ("текстyoutube.com/watch?v=dQw4w9WgXcQ", None),
+        ("my.youtube.com/watch?v=dQw4w9WgXcQ", "my.youtube.com/watch?v=dQw4w9WgXcQ"),
+        ("Смотри youtube.com/watch?v=dQw4w9WgXcQ", "youtube.com/watch?v=dQw4w9WgXcQ"),
+    ],
+)
+def test_link_regex_has_left_boundary(text: str, expected: str | None) -> None:
+    """Чужой домен вида ``notyoutube.com``/``not_youtube.com`` — не ссылка YouTube."""
+    assert extract_first_url(text) == expected
+
+
+def test_error_log_contains_safe_video_id_without_query(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "query-secret-token-value"
+    url = f"https://www.youtube.com/watch?v=dQw4w9WgXcQ&access_token={secret}"
+    # URL попадает в текст исключения, а не только в контекст обработчика:
+    # именно так утекала query-строка через format_reason (P3 T-016).
+    service = FakeSummaryService(error=RuntimeError(f"request failed for {url}"))
+
+    with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
+        run_message(service, f"Смотри {url}")
+
+    assert secret not in caplog.text, "query-строка не должна попадать в лог"
+    assert url not in caplog.text, "полный URL не должен попадать в лог"
+    assert "dQw4w9WgXcQ" in caplog.text, "безопасный video_id помогает найти инцидент"
+
+
+def test_error_log_for_other_domain_contains_only_host(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "another-query-secret"
+    url = f"https://example.com/page?token={secret}"
+    service = FakeSummaryService(error=RuntimeError(f"request failed for {url}"))
+
+    with caplog.at_level(logging.ERROR, logger="tldw.handlers.link"):
+        run_message(service, f"Вот {url}")
+
+    assert secret not in caplog.text
+    assert url not in caplog.text
+    assert "/page" not in caplog.text, "в логе остаётся только host без пути и query"
+    assert "example.com" in caplog.text
+
+
+def test_success_log_contains_video_id(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    service = FakeSummaryService(result=make_result(tmp_path))
+
+    with caplog.at_level(logging.INFO, logger="tldw.handlers.link"):
+        run_message(service, VIDEO_URL)
+
+    assert "dQw4w9WgXcQ" in caplog.text
+    assert VIDEO_URL not in caplog.text
+
+
+def test_access_denied_reply_does_not_raise_aiogram_error() -> None:
+    """Сбой ответа «доступ закрыт» гасится, а не уходит в aiogram."""
+    service = FakeSummaryService()
+
+    class BrokenMessage:
+        from_user = SimpleNamespace(id=42)
+        text = VIDEO_URL
+        attempts = 0
+
+        async def answer(self, text: str, **kwargs: object) -> None:
+            self.attempts += 1
+            raise RuntimeError("telegram is unavailable")
+
+    message = BrokenMessage()
+    handler = LinkHandler(service, allowed_user_ids=(1001,))
+
+    asyncio.run(handler.handle_message(message))  # type: ignore[arg-type]
+
+    assert message.attempts == 1
+    assert service.calls == []
+
+
+def test_repeated_denials_do_not_flood_warning_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = FakeSummaryService()
+
+    async def scenario() -> None:
+        harness = make_harness(service, allowed_user_ids=(1001,))
+        try:
+            for update_id in (1, 2, 3):
+                await harness.dispatcher.feed_update(
+                    harness.bot,
+                    make_update(VIDEO_URL, update_id=update_id, user_id=42),
+                )
+        finally:
+            await harness.close()
+
+    with caplog.at_level(logging.WARNING, logger="tldw.handlers.link"):
+        asyncio.run(scenario())
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "tldw.handlers.link" and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1, "повторные отказы не должны заливать WARNING"
+    assert service.calls == []
+
+
+def test_repeated_link_is_deduplicated_and_llm_called_once(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    service = FakeSummaryService(
+        result=make_result(tmp_path),
+        started=started,
+        release=release,
+    )
+
+    captured: list[str] = []
+
+    async def scenario() -> None:
+        harness = make_harness(service)
+        try:
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(VIDEO_URL, update_id=1),
+            )
+            assert await asyncio.to_thread(started.wait, 5), "обработка не стартовала"
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(VIDEO_URL, update_id=2),
+            )
+            release.set()
+            await harness.handler.wait_idle()
+            captured.extend(
+                request.text
+                for request in harness.session.requests
+                if hasattr(request, "text")
+            )
+        finally:
+            release.set()
+            await harness.handler.wait_idle()
+            await harness.close()
+
+    asyncio.run(scenario())
+    texts = captured
+
+    assert service.calls == [VIDEO_URL], "повторная ссылка не должна вызывать LLM дважды"
+    assert MESSAGE_ALREADY_PROCESSING in texts
+    assert texts.count(MESSAGE_ACCEPTED) == 1
+    assert texts.count(MESSAGE_DONE) == 1
+
+
+def test_same_link_in_another_chat_is_not_deduplicated(tmp_path: Path) -> None:
+    """Та же ссылка в другом чате — другая доставка, а не дубль (REVIEW-2 T-016).
+
+    Ключ дедупликации включает чат: заметка отправляется в чат сообщения,
+    поэтому ответ «уже обрабатывается» во втором чате означал бы, что ``.md``
+    туда не придёт вовсе.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    service = FakeSummaryService(
+        result=make_result(tmp_path),
+        started=started,
+        release=release,
+    )
+    captured: list[str] = []
+
+    async def scenario() -> None:
+        harness = make_harness(service)
+        try:
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(VIDEO_URL, update_id=1, chat_id=100),
+            )
+            assert await asyncio.to_thread(started.wait, 5), "обработка не стартовала"
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(VIDEO_URL, update_id=2, chat_id=200),
+            )
+            release.set()
+            await harness.handler.wait_idle()
+            captured.extend(
+                request.text
+                for request in harness.session.requests
+                if hasattr(request, "text")
+            )
+        finally:
+            release.set()
+            await harness.handler.wait_idle()
+            await harness.close()
+
+    asyncio.run(scenario())
+
+    assert sorted(service.calls) == sorted([VIDEO_URL, VIDEO_URL]), (
+        "второй чат должен получить свою заметку, а не «уже обрабатывается»"
+    )
+    assert MESSAGE_ALREADY_PROCESSING not in captured
+    assert captured.count(MESSAGE_DONE) == 2, "готово должно уйти в оба чата"
+
+
+def test_concurrent_duplicate_links_are_deduplicated(tmp_path: Path) -> None:
+    """Два апдейта одного пользователя одновременно не запускают LLM дважды.
+
+    Регресс T-016: раньше между проверкой ``_inflight`` и созданием задачи
+    стоял ``await`` (ответ «принял» и чтение шаблона), поэтому оба обработчика
+    проходили проверку и второй перезаписывал слот. Медленное чтение шаблона
+    здесь специально удерживает первое окно гонки открытым.
+    """
+    service = FakeSummaryService(result=make_result(tmp_path))
+
+    class SlowRepository(FakeTemplateRepository):
+        def load(self, user_id: int) -> tuple[tuple[str, ...], str] | None:
+            # Чтение шаблона — в рабочем потоке, поэтому loop успевает вызвать
+            # второй handle_message, пока первый ещё не создал задачу.
+            time.sleep(0.05)
+            return super().load(user_id)
+
+    duplicate_seen = asyncio.Event()
+
+    class _Message:
+        from_user = SimpleNamespace(id=42)
+        chat = SimpleNamespace(id=42)
+        text = VIDEO_URL
+
+        def __init__(self) -> None:
+            self.answers: list[str] = []
+            self.documents: list[FSInputFile] = []
+
+        async def answer(self, text: str, **kwargs: object) -> None:
+            if text == MESSAGE_ALREADY_PROCESSING:
+                duplicate_seen.set()
+            elif text == MESSAGE_ACCEPTED:
+                # «Принял» — сетевой вызов. В старом коде он стоял между
+                # проверкой ``_inflight`` и созданием задачи, поэтому оба
+                # обработчика успевали пройти проверку. Здесь ожидание делает
+                # это окно детерминированным.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(duplicate_seen.wait(), timeout=0.5)
+            self.answers.append(text)
+
+        async def answer_document(self, document: FSInputFile, **kwargs: object) -> None:
+            self.documents.append(document)
+
+    async def scenario() -> tuple[_Message, _Message]:
+        handler = LinkHandler(
+            service,
+            template_service=TemplateService(SlowRepository()),
+        )
+        first, second = _Message(), _Message()
+        try:
+            await asyncio.gather(
+                handler.handle_message(first),  # type: ignore[arg-type]
+                handler.handle_message(second),  # type: ignore[arg-type]
+            )
+            await handler.wait_idle()
+        finally:
+            await handler.aclose()
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    answers = first.answers + second.answers
+    assert service.calls == [VIDEO_URL], "повторная ссылка не должна вызывать LLM дважды"
+    assert answers.count(MESSAGE_ACCEPTED) == 1
+    assert answers.count(MESSAGE_ALREADY_PROCESSING) == 1
+
+
+def test_concurrency_limit_serialises_different_links(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    service = FakeSummaryService(
+        result=make_result(tmp_path),
+        started=started,
+        release=release,
+    )
+    second_url = "https://youtu.be/bbbbbbbbbbb"
+
+    async def scenario() -> None:
+        harness = make_harness(service, max_concurrent=1)
+        try:
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(VIDEO_URL, update_id=1),
+            )
+            await harness.dispatcher.feed_update(
+                harness.bot,
+                make_update(second_url, update_id=2),
+            )
+            assert await asyncio.to_thread(started.wait, 5)
+            assert service.calls == [VIDEO_URL], "вторая ссылка ждёт семафор"
+        finally:
+            release.set()
+            await harness.handler.wait_idle()
+            await harness.close()
+
+    asyncio.run(scenario())
+
+    assert sorted(service.calls) == sorted([VIDEO_URL, second_url])
+
+
+def test_template_read_runs_in_worker_thread(
+    tmp_path: Path,
+) -> None:
+    """Синхронное чтение шаблона обработчика уходит в ``to_thread``.
+
+    Проверка файла заметки использует тот же ``asyncio.to_thread``; её
+    отдельный наблюдаемый шов без приватных имён — зона T-018.
+    """
+    load_threads: list[int] = []
+
+    class RecordingRepository(FakeTemplateRepository):
+        def load(self, user_id: int) -> tuple[tuple[str, ...], str] | None:
+            load_threads.append(threading.get_ident())
+            return super().load(user_id)
+
+    repository = RecordingRepository()
+    repository.records[42] = (("Коротко",), "короче")
+    service = FakeSummaryService(result=make_result(tmp_path))
+    loop_threads: list[int] = []
+
+    async def scenario() -> None:
+        loop_threads.append(threading.get_ident())
+        harness = make_harness(
+            service,
+            template_service=TemplateService(repository),
+        )
+        try:
+            await harness.send(VIDEO_URL, user_id=42)
+            await harness.handler.wait_idle()
+        finally:
+            await harness.close()
+
+    asyncio.run(scenario())
+
+    assert loop_threads
+    assert load_threads and all(thread != loop_threads[0] for thread in load_threads)

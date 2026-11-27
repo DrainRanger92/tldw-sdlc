@@ -46,6 +46,7 @@ from tldw.errors import (
     UserFacingError,
     describe_error,
     format_reason,
+    format_traceback,
     log_failure,
     sanitize_log_text,
 )
@@ -306,3 +307,171 @@ def test_traceback_collapses_indented_multiline_exception_message() -> None:
 
 def test_sanitize_log_text_keeps_short_clean_text() -> None:
     assert sanitize_log_text("  короткая   причина  ") == "короткая причина"
+
+
+# --- T-016: редактор секретов, ExceptionGroup, длинные кадры, LOG_LEVEL=ERROR ---
+
+
+def test_max_tokens_is_not_mistaken_for_a_secret() -> None:
+    """Лимит ответа LLM — не секрет: редактор не должен скрывать 4096.
+
+    ``TOKEN(?!S)`` держит исключение для счётчиков ``*_TOKENS`` даже после
+    того, как у шаблона появился хвост имени (REVIEW-2 T-016).
+    """
+    text = sanitize_log_text(
+        "max_tokens=4096, MAX_OUTPUT_TOKENS=4096, tokens=4096, input_tokens=17"
+    )
+
+    for limit in ("4096", "17"):
+        assert limit in text
+    assert REDACTED not in text
+
+
+def test_secret_names_still_redacted_after_false_positive_fix() -> None:
+    text = sanitize_log_text(
+        f"LLM_API_KEY={FAKE_ENV_KEY} api_key=value-two "
+        f"Authorization: Bearer {FAKE_BEARER_TOKEN}"
+    )
+
+    for value in (FAKE_ENV_KEY, "value-two", FAKE_BEARER_TOKEN):
+        assert value not in text
+    assert REDACTED in text
+
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        ("llm_api_key=SECRET-VALUE", "SECRET-VALUE"),
+        ("db_password=hunter2", "hunter2"),
+        ("bot_token=telegram-secret-value", "telegram-secret-value"),
+        ("MY_AUTHORIZATION=token-value", "token-value"),
+        ("my_api_key=lower-case-value", "lower-case-value"),
+        # Ловушки REVIEW-2: секретное слово стоит внутри имени, а не в конце.
+        # Пока хвост `[A-Za-z0-9_]*` после ключевого слова был потерян, эти
+        # значения уходили в лог как есть.
+        ("SECRET_KEY=topsecret", "topsecret"),
+        ("MY_SECRET_KEY=my-secret-value", "my-secret-value"),
+        ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI", "wJalrXUtnFEMI"),
+        ("PASSWORD_HASH=$2b$12$hash-value", "$2b$12$hash-value"),
+        ("ACCESS_TOKEN_HASH=zzz", "zzz"),
+        ("TELEGRAM_BOT_TOKEN=123456789:bot-secret-value", "bot-secret-value"),
+    ],
+)
+def test_env_secret_names_are_redacted_case_insensitively(
+    message: str,
+    secret: str,
+) -> None:
+    """Регресс T-016: имена с ``_`` и в нижнем регистре снова скрываются.
+
+    Сужение шаблона до «только верхний регистр» открыло дыру в P2-защите:
+    ``llm_api_key``/``db_password`` больше не вычищались. Исключение —
+    только счётчики ``*_TOKENS`` (см. ``test_max_tokens_is_not_mistaken...``).
+    Второй раунд ревью нашёл более узкий регресс: имя должно было
+    **заканчиваться** секретным словом, поэтому ``SECRET_KEY``,
+    ``PASSWORD_HASH``, ``AWS_SECRET_ACCESS_KEY`` и ``ACCESS_TOKEN_HASH``
+    проходили в лог открытыми. Ловушки выше закрепляют хвост имени.
+    """
+    text = sanitize_log_text(message)
+
+    assert secret not in text
+    assert REDACTED in text
+
+
+def test_url_in_exception_is_reduced_to_host_without_query() -> None:
+    """Полный URL с приватной query не попадает в лог через ``str(exc)``."""
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=private-user-id"
+    report = describe_error(raised(RuntimeError(f"request failed for {url}")))
+
+    for text in (report.reason, report.traceback_text or ""):
+        assert url not in text
+        assert "si=private-user-id" not in text
+        assert "v=" not in text
+        assert "https://www.youtube.com" in text
+
+
+def test_traceback_preserves_exception_group() -> None:
+    """Группа не схлопывается в одну строку и сохраняет вложенные ошибки."""
+    try:
+        try:
+            raise ValueError("inner boom")
+        except ValueError as inner:
+            group = ExceptionGroup("outer group", [inner, RuntimeError("second")])
+        raise group
+    except Exception as exc:  # noqa: BLE001 - тесту нужен объект с трейсбеком
+        caught = exc
+
+    text = format_traceback(caught)
+
+    assert "ExceptionGroup: outer group" in text
+    assert "ValueError" in text
+    assert "RuntimeError: second" in text
+    assert len(text.splitlines()) >= 4, "структура группы должна остаться многострочной"
+    assert "inner boom" in text
+
+
+def test_traceback_preserves_nested_exception_groups() -> None:
+    nested = ExceptionGroup("inner group", [ValueError("deep")])
+    group = ExceptionGroup("outer group", [nested, KeyError("key")])
+    try:
+        raise group
+    except Exception as exc:  # noqa: BLE001 - тесту нужен объект с трейсбеком
+        caught = exc
+
+    text = format_traceback(caught)
+
+    assert "outer group" in text
+    assert "inner group" in text
+    assert "ValueError: deep" in text
+    assert "KeyError" in text
+
+
+def test_traceback_keeps_all_lines_of_a_long_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Длинный кадр: сохраняются все строки исходника, а не только две."""
+    lines = [
+        "Traceback (most recent call last):\n",
+        '  File "app.py", line 1, in f\n',
+        "    first source line\n",
+        "    second source line\n",
+        "    third source line\n",
+        "ValueError: boom\n",
+    ]
+    monkeypatch.setattr("tldw.errors.traceback.format_exception", lambda exc: lines)
+
+    text = format_traceback(RuntimeError("boom"))
+    rendered = text.splitlines()
+
+    assert '  File "app.py", line 1, in f' in rendered
+    assert "    first source line" in rendered
+    assert "    second source line" in rendered
+    assert "    third source line" in rendered
+    assert "ValueError: boom" in rendered
+
+
+def test_known_error_stays_visible_at_error_log_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """При LOG_LEVEL=ERROR причина известной ошибки не исчезает из лога."""
+    with caplog.at_level(logging.ERROR, logger="tldw.errors"):
+        report = log_failure(NoTranscriptError())
+
+    records = [record for record in caplog.records if record.name == "tldw.errors"]
+    assert records, "известная ошибка должна быть видна при пороге ERROR"
+    assert records[0].levelno == logging.ERROR
+    assert "NoTranscriptError" in records[0].getMessage()
+    assert "Traceback" not in records[0].getMessage()
+    # Смысл отчёта не меняется: известная ошибка по-прежнему WARNING.
+    assert report.level == logging.WARNING
+
+
+def test_unknown_error_at_critical_threshold_is_not_lost(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.CRITICAL, logger="tldw.errors"):
+        log_failure(raised(RuntimeError("boom")))
+
+    records = [record for record in caplog.records if record.name == "tldw.errors"]
+    assert records
+    assert records[0].levelno == logging.CRITICAL
+    assert "RuntimeError: boom" in records[0].getMessage()

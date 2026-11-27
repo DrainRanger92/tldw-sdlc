@@ -29,11 +29,9 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
-from urllib.parse import parse_qs, urlsplit
 
 # requests — жёсткая зависимость youtube-transcript-api 1.x: библиотека
 # принимает её сессию в ``http_client``. Отдельной строки в pyproject нет.
@@ -48,7 +46,7 @@ from youtube_transcript_api import (
 from yt_dlp import DownloadError, YoutubeDL
 
 from tldw.errors import UserFacingError
-from tldw.text import one_line
+from tldw.text import one_line, video_id_from_url
 
 log = logging.getLogger(__name__)
 
@@ -88,24 +86,6 @@ MESSAGE_NO_TRANSCRIPT: Final = (
 )
 MESSAGE_NETWORK: Final = "Не удалось получить данные с YouTube. Попробуйте позже."
 MESSAGE_VIDEO_UNAVAILABLE: Final = "Видео недоступно: возможно, оно удалено или закрыто."
-
-_YOUTUBE_HOSTS: Final[frozenset[str]] = frozenset(
-    {
-        "youtube.com",
-        "www.youtube.com",
-        "m.youtube.com",
-        "music.youtube.com",
-        "youtube-nocookie.com",
-        "www.youtube-nocookie.com",
-    }
-)
-_SHORT_HOSTS: Final[frozenset[str]] = frozenset({"youtu.be", "www.youtu.be"})
-#: Идентификатор видео YouTube: ровно 11 символов URL-safe base64.
-_VIDEO_ID_RE: Final = re.compile(r"^[A-Za-z0-9_-]{11}$")
-#: Пути вида /shorts/<id>, /embed/<id>, /live/<id>.
-_VIDEO_PATH_RE: Final = re.compile(r"^/(?:shorts|embed|live)/([^/]+)/?$")
-_SHORT_PATH_RE: Final = re.compile(r"^/([^/]+)/?$")
-_WATCH_PATH: Final = "/watch"
 
 
 class YouTubeAdapterError(UserFacingError):
@@ -276,35 +256,13 @@ def parse_video_id(url: str) -> str:
     if not isinstance(url, str):
         raise NotYouTubeURLError(MESSAGE_NOT_YOUTUBE)
 
-    raw = url.strip()
-    if not raw:
-        raise NotYouTubeURLError(MESSAGE_NOT_YOUTUBE)
-    if "://" not in raw:
-        raw = f"https://{raw.lstrip('/')}"
-
     try:
-        parts = urlsplit(raw)
-        host = (parts.hostname or "").lower()
+        video_id = video_id_from_url(url, strict=True)
     except ValueError as exc:
         raise NotYouTubeURLError(MESSAGE_NOT_YOUTUBE) from exc
-
-    if parts.scheme.lower() not in {"http", "https"}:
+    if video_id is None:
         raise NotYouTubeURLError(MESSAGE_NOT_YOUTUBE)
-
-    candidate = ""
-    if host in _SHORT_HOSTS:
-        match = _SHORT_PATH_RE.fullmatch(parts.path)
-        candidate = match.group(1) if match else ""
-    elif host in _YOUTUBE_HOSTS:
-        if parts.path.rstrip("/") == _WATCH_PATH:
-            candidate = (parse_qs(parts.query).get("v") or [""])[0]
-        else:
-            match = _VIDEO_PATH_RE.fullmatch(parts.path)
-            candidate = match.group(1) if match else ""
-
-    if not _VIDEO_ID_RE.fullmatch(candidate):
-        raise NotYouTubeURLError(MESSAGE_NOT_YOUTUBE)
-    return candidate
+    return video_id
 
 
 class _TimeoutSession(Session):
