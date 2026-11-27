@@ -36,9 +36,11 @@ from .speech import (
 )
 from .youtube import (
     DEFAULT_LANGUAGES,
+    DEFAULT_TRANSCRIPT_TIMEOUT,
     SOURCE_TRANSCRIPT_API,
     SOURCE_YTDLP,
     FallbackClient,
+    FallbackVideo,
     NoTranscriptError,
     NotYouTubeURLError,
     Transcript,
@@ -57,7 +59,9 @@ from .youtube import (
 
 __all__ = [
     "DEFAULT_LANGUAGES",
+    "DEFAULT_TRANSCRIPT_TIMEOUT",
     "FallbackClient",
+    "FallbackVideo",
     "LLMClient",
     "LLMConfigError",
     "LLMError",

@@ -5,16 +5,23 @@
 Порядок получения данных:
 
 1. ссылка проверяется и превращается в video id (:func:`parse_video_id`);
-2. транскрипт берётся через ``youtube-transcript-api`` (основной источник);
+2. транскрипт берётся через ``youtube-transcript-api`` (основной источник) с
+   явным таймаутом: сессия передаётся библиотеке как ``http_client``;
 3. если основной источник не дал субтитров или упал по сети/блокировке —
    включается fallback через ``yt-dlp``;
 4. метаданные (title, channel, duration) читаются через ``yt-dlp`` и считаются
    необязательными: без них видео всё равно можно законспектировать.
+   Информация о видео извлекается один раз: если транскрипт пришёл из
+   fallback, метаданные берутся из того же ответа ``yt-dlp``.
 
 Все внешние библиотеки спрятаны за узкими протоколами :class:`TranscriptClient`
 и :class:`FallbackClient`, поэтому тесты подменяют их фейками и не ходят в
 сеть. Адаптер синхронный: вызывающий слой уводит его в отдельный поток, чтобы
 не блокировать event loop Telegram-бота.
+
+``requests`` — зависимость ``youtube-transcript-api`` 1.x: библиотека принимает
+готовую сессию ``http_client`` и не имеет отдельного параметра таймаута,
+поэтому своей строки в ``pyproject.toml`` адаптер не требует.
 """
 
 from __future__ import annotations
@@ -28,13 +35,17 @@ from dataclasses import dataclass
 from typing import Any, Final, Protocol
 from urllib.parse import parse_qs, urlsplit
 
+# requests — жёсткая зависимость youtube-transcript-api 1.x: библиотека
+# принимает её сессию в ``http_client``. Отдельной строки в pyproject нет.
+from requests import Response, Session
+from requests.exceptions import Timeout
 from youtube_transcript_api import (
     NoTranscriptFound,
     TranscriptsDisabled,
     VideoUnavailable,
     YouTubeTranscriptApi,
 )
-from yt_dlp import YoutubeDL
+from yt_dlp import DownloadError, YoutubeDL
 
 from tldw.errors import UserFacingError
 from tldw.text import one_line
@@ -43,10 +54,27 @@ log = logging.getLogger(__name__)
 
 #: Языки субтитров в порядке предпочтения: сначала оригинал, затем английский.
 DEFAULT_LANGUAGES: Final[tuple[str, ...]] = ("ru", "en")
+#: Таймаут запросов основного источника (секунды): зависший YouTube не должен
+#: держать поток ``asyncio.to_thread`` бесконечно.
+DEFAULT_TRANSCRIPT_TIMEOUT: Final[float] = 10.0
 #: Основной источник субтитров — библиотека youtube-transcript-api.
 SOURCE_TRANSCRIPT_API: Final = "youtube-transcript-api"
 #: Резервный источник — субтитры, скачанные yt-dlp.
 SOURCE_YTDLP: Final = "yt-dlp"
+#: Признаки недоступности видео в тексте ``DownloadError`` от yt-dlp: у
+#: библиотеки нет отдельных классов для private/unavailable.
+_UNAVAILABLE_DOWNLOAD_MARKERS: Final[tuple[str, ...]] = (
+    "private video",
+    "video is private",
+    "video unavailable",
+    "this video is unavailable",
+    "this video has been removed",
+    "removed by the uploader",
+    "no longer available",
+    "account associated with this video has been terminated",
+    "members-only",
+    "join this channel",
+)
 #: Шаблон ссылки для yt-dlp: библиотека работает с URL, а не с голым id.
 WATCH_URL_TEMPLATE: Final = "https://www.youtube.com/watch?v={video_id}"
 #: Единственный формат субтитров, который разбирает fallback (его отдаёт YouTube).
@@ -207,14 +235,32 @@ class TranscriptClient(Protocol):
         """Вернуть транскрипт или поднять :class:`YouTubeAdapterError`."""
 
 
+@dataclass(frozen=True, slots=True)
+class FallbackVideo:
+    """Итог одного обращения к ``yt-dlp``: транскрипт и метаданные видео."""
+
+    transcript: Transcript
+    metadata: VideoMetadata
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.transcript, Transcript):
+            raise TypeError("transcript должен быть Transcript")
+        if not isinstance(self.metadata, VideoMetadata):
+            raise TypeError("metadata должен быть VideoMetadata")
+
+
 class FallbackClient(Protocol):
     """Резервный источник (``yt-dlp``): метаданные и субтитры."""
 
     def fetch_metadata(self, video_id: str) -> VideoMetadata:
         """Вернуть метаданные видео или поднять :class:`YouTubeAdapterError`."""
 
-    def fetch_transcript(self, video_id: str) -> Transcript:
-        """Вернуть транскрипт или поднять :class:`YouTubeAdapterError`."""
+    def fetch(self, video_id: str) -> FallbackVideo:
+        """Один запрос к ``yt-dlp``: транскрипт и метаданные видео.
+
+        Метаданные строятся из того же ответа, что и субтитры, поэтому
+        вызывающему не нужен второй полный ``_extract_info``.
+        """
 
 
 def parse_video_id(url: str) -> str:
@@ -261,6 +307,23 @@ def parse_video_id(url: str) -> str:
     return candidate
 
 
+class _TimeoutSession(Session):
+    """``requests.Session`` с таймаутом по умолчанию для каждого запроса.
+
+    ``youtube-transcript-api`` 1.x не принимает таймаут в ``fetch()``, но
+    принимает готовую сессию в ``http_client``. Без такого таймаута зависший
+    ответ YouTube держал бы поток ``asyncio.to_thread`` бесконечно.
+    """
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__()
+        self.timeout = _timeout_seconds(timeout)
+
+    def request(self, method: str, url: str, **kwargs: Any) -> Response:
+        kwargs.setdefault("timeout", self.timeout)
+        return super().request(method, url, **kwargs)
+
+
 class TranscriptApiClient:
     """Клиент ``youtube-transcript-api`` — основной источник субтитров."""
 
@@ -269,30 +332,27 @@ class TranscriptApiClient:
         *,
         languages: Sequence[str] = DEFAULT_LANGUAGES,
         api: object | None = None,
+        timeout: float = DEFAULT_TRANSCRIPT_TIMEOUT,
     ) -> None:
         self.languages = tuple(languages)
+        self.timeout = _timeout_seconds(timeout)
         self._api = api
 
     def fetch(self, video_id: str) -> Transcript:
         """Получить транскрипт и перевести ошибки библиотеки в типизированные."""
-        api = self._api if self._api is not None else YouTubeTranscriptApi()
+        api = self._api if self._api is not None else self._make_api()
         try:
             fetched = api.fetch(video_id, languages=list(self.languages))
         except (TranscriptsDisabled, NoTranscriptFound) as exc:
             raise NoTranscriptError(MESSAGE_NO_TRANSCRIPT) from exc
         except VideoUnavailable as exc:
             raise VideoUnavailableError(MESSAGE_VIDEO_UNAVAILABLE) from exc
+        except Timeout as exc:  # явный таймаут сессии
+            raise YouTubeNetworkError(MESSAGE_NETWORK) from exc
         except Exception as exc:  # сеть, блокировка IP, битый ответ YouTube
             raise YouTubeNetworkError(MESSAGE_NETWORK) from exc
 
-        segments = tuple(
-            TranscriptSegment(
-                text=snippet.text,
-                start_seconds=snippet.start,
-                duration_seconds=snippet.duration,
-            )
-            for snippet in fetched
-        )
+        segments = _segments_from_fetched(fetched)
         transcript = Transcript(
             segments=segments,
             language=_text(getattr(fetched, "language_code", "")),
@@ -301,6 +361,10 @@ class TranscriptApiClient:
         if transcript.is_empty:
             raise NoTranscriptError(MESSAGE_NO_TRANSCRIPT)
         return transcript
+
+    def _make_api(self) -> object:
+        """Создать клиент библиотеки с сессией, у которой есть таймаут."""
+        return YouTubeTranscriptApi(http_client=_TimeoutSession(self.timeout))
 
 
 class YtDlpClient:
@@ -313,11 +377,19 @@ class YtDlpClient:
         socket_timeout: float = 15.0,
     ) -> None:
         self.languages = tuple(languages)
-        self.socket_timeout = socket_timeout
+        self.socket_timeout = _timeout_seconds(socket_timeout, "socket_timeout")
 
     def fetch_metadata(self, video_id: str) -> VideoMetadata:
         """Прочитать title, channel и duration (в секундах), если они есть."""
+        return self._metadata(video_id, self._extract_info(video_id))
+
+    def fetch(self, video_id: str) -> FallbackVideo:
+        """Скачать субтитры и прочитать метаданные за одно обращение к yt-dlp."""
         info = self._extract_info(video_id)
+        metadata = self._metadata(video_id, info)
+        return FallbackVideo(transcript=self._transcript(info), metadata=metadata)
+
+    def _metadata(self, video_id: str, info: Mapping[str, Any]) -> VideoMetadata:
         return VideoMetadata(
             video_id=video_id,
             title=_text(info.get("title")),
@@ -325,9 +397,7 @@ class YtDlpClient:
             duration_seconds=_coerce_duration(info.get("duration")),
         )
 
-    def fetch_transcript(self, video_id: str) -> Transcript:
-        """Скачать субтитры через yt-dlp и разобрать их в сегменты."""
-        info = self._extract_info(video_id)
+    def _transcript(self, info: Mapping[str, Any]) -> Transcript:
         tracks = _caption_tracks(info)
         if not tracks:
             raise NoTranscriptError(MESSAGE_NO_TRANSCRIPT)
@@ -349,7 +419,9 @@ class YtDlpClient:
                 info = ydl.extract_info(
                     WATCH_URL_TEMPLATE.format(video_id=video_id), download=False
                 )
-        except Exception as exc:  # DownloadError, сеть, блокировка, таймаут
+        except DownloadError as exc:
+            raise _download_error(exc) from exc
+        except Exception as exc:  # сеть, блокировка, таймаут
             raise YouTubeNetworkError(MESSAGE_NETWORK) from exc
 
         if not isinstance(info, dict):
@@ -375,6 +447,9 @@ class YtDlpClient:
             "noplaylist": True,
             "skip_download": True,
             "socket_timeout": self.socket_timeout,
+            # Данные приложения живут только в DATA_DIR; кэш yt-dlp по
+            # умолчанию писал бы в ~/.cache/yt-dlp — отключаем его.
+            "cachedir": False,
         }
 
 
@@ -384,8 +459,9 @@ class YouTubeAdapter:
     Основной источник транскрипта — :class:`TranscriptApiClient`, резервный
     (yt-dlp) — :class:`YtDlpClient`. Оба клиента можно подменить фейками.
     Если основной источник не сработал, fallback пробуется при любом
-    :class:`YouTubeAdapterError`; когда оба сообщают «нет субтитров», наружу
-    выходит :class:`NoTranscriptError`, иначе — сетевая ошибка.
+    :class:`YouTubeAdapterError`. За один :meth:`fetch` ``yt-dlp`` извлекает
+    информацию о видео не больше одного раза: транскрипт и метаданные
+    приходят из одного ответа.
     """
 
     def __init__(
@@ -409,36 +485,42 @@ class YouTubeAdapter:
 
         :raises NotYouTubeURLError: ссылка не на YouTube.
         :raises NoTranscriptError: у видео нет субтитров в обоих источниках.
-        :raises YouTubeNetworkError: YouTube не отвечает или видео недоступно.
+        :raises VideoUnavailableError: видео удалено, приватное или закрыто.
+        :raises YouTubeNetworkError: YouTube не отвечает или ответил не так.
         """
         video_id = parse_video_id(url)
-        transcript = self.fetch_transcript(video_id)
-        metadata = self.fetch_metadata(video_id)
+        transcript, metadata = self._fetch_content(video_id)
         return Video(url=url.strip(), metadata=metadata, transcript=transcript)
 
-    def fetch_transcript(self, video_id: str) -> Transcript:
+    def _fetch_content(self, video_id: str) -> tuple[Transcript, VideoMetadata]:
         """Взять транскрипт из основного источника, при сбое — из yt-dlp."""
         try:
             transcript = self._transcript_client.fetch(video_id)
-            if not transcript.is_empty:
-                return transcript
-            primary_error: YouTubeAdapterError = NoTranscriptError(MESSAGE_NO_TRANSCRIPT)
-        except YouTubeAdapterError as exc:
-            primary_error = exc
+            if transcript.is_empty:
+                raise NoTranscriptError(MESSAGE_NO_TRANSCRIPT)
+        except YouTubeAdapterError as primary_error:
+            log.warning(
+                "Основной источник субтитров не сработал (%s), пробуем yt-dlp",
+                type(primary_error).__name__,
+            )
+            return self._fetch_fallback(video_id, primary_error)
+        return transcript, self.fetch_metadata(video_id)
 
-        log.warning(
-            "Основной источник субтитров не сработал (%s), пробуем yt-dlp",
-            type(primary_error).__name__,
-        )
+    def _fetch_fallback(
+        self,
+        video_id: str,
+        primary_error: YouTubeAdapterError,
+    ) -> tuple[Transcript, VideoMetadata]:
         try:
-            transcript = self._fallback_client.fetch_transcript(video_id)
-            if not transcript.is_empty:
-                return transcript
+            fallback_video = self._fallback_client.fetch(video_id)
+            if not fallback_video.transcript.is_empty:
+                return fallback_video.transcript, fallback_video.metadata
             fallback_error: YouTubeAdapterError = NoTranscriptError(MESSAGE_NO_TRANSCRIPT)
         except YouTubeAdapterError as exc:
             fallback_error = exc
 
-        raise _transcript_error(primary_error, fallback_error) from fallback_error
+        final_error, cause = _transcript_error(primary_error, fallback_error)
+        raise final_error from cause
 
     def fetch_metadata(self, video_id: str) -> VideoMetadata:
         """Прочитать метаданные; сбой не мешает обработать транскрипт."""
@@ -449,17 +531,81 @@ class YouTubeAdapter:
             return VideoMetadata(video_id=video_id)
 
 
+def _segments_from_fetched(fetched: object) -> tuple[TranscriptSegment, ...]:
+    """Нормализовать ответ ``youtube-transcript-api`` в сегменты.
+
+    Битый ответ библиотеки (``None``, dict старого формата 0.x, строка)
+    считается сбоем источника и даёт :class:`YouTubeNetworkError`, а не
+    ``TypeError``/``AttributeError`` наружу.
+    """
+    if fetched is None or isinstance(fetched, str | bytes | Mapping):
+        raise YouTubeNetworkError(MESSAGE_NETWORK)
+    try:
+        snippets = list(fetched)
+    except TypeError as exc:
+        raise YouTubeNetworkError(MESSAGE_NETWORK) from exc
+
+    segments: list[TranscriptSegment] = []
+    for snippet in snippets:
+        if isinstance(snippet, Mapping):
+            raise YouTubeNetworkError(MESSAGE_NETWORK)
+        text = getattr(snippet, "text", None)
+        if not isinstance(text, str):
+            raise YouTubeNetworkError(MESSAGE_NETWORK)
+        try:
+            segments.append(
+                TranscriptSegment(
+                    text=text,
+                    start_seconds=getattr(snippet, "start", None),
+                    duration_seconds=getattr(snippet, "duration", 0.0),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise YouTubeNetworkError(MESSAGE_NETWORK) from exc
+    return tuple(segments)
+
+
+def _download_error(exc: Exception) -> YouTubeNetworkError:
+    """Перевести ``DownloadError`` yt-dlp в типизированную ошибку.
+
+    У yt-dlp нет отдельных классов для private/unavailable, поэтому признак
+    ищется в тексте; сам текст в лог не попадает.
+    """
+    message = str(exc).lower()
+    if any(marker in message for marker in _UNAVAILABLE_DOWNLOAD_MARKERS):
+        return VideoUnavailableError(MESSAGE_VIDEO_UNAVAILABLE)
+    return YouTubeNetworkError(MESSAGE_NETWORK)
+
+
+def _timeout_seconds(value: object, field_name: str = "timeout") -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{field_name} должен быть числом секунд")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} должен быть конечным числом")
+    if number <= 0:
+        raise ValueError(f"{field_name} должен быть положительным")
+    return number
+
+
 def _transcript_error(
     primary_error: YouTubeAdapterError,
     fallback_error: YouTubeAdapterError,
-) -> YouTubeAdapterError:
-    if isinstance(primary_error, NoTranscriptError) or isinstance(
-        fallback_error, NoTranscriptError
-    ):
-        return NoTranscriptError(MESSAGE_NO_TRANSCRIPT)
-    if isinstance(fallback_error, VideoUnavailableError):
-        return VideoUnavailableError(MESSAGE_VIDEO_UNAVAILABLE)
-    return YouTubeNetworkError(MESSAGE_NETWORK)
+) -> tuple[YouTubeAdapterError, YouTubeAdapterError]:
+    """Выбрать итоговую ошибку и её причину для ``raise ... from``.
+
+    Приоритет по ADR-004: «видео недоступно» важнее «нет субтитров», а
+    «нет субтитров» — важнее сети. Причина — ошибка того источника, который
+    определил итог: ``from fallback_error`` при победе primary вводил бы в
+    заблуждение.
+    """
+    for error in (primary_error, fallback_error):
+        if isinstance(error, VideoUnavailableError):
+            return VideoUnavailableError(MESSAGE_VIDEO_UNAVAILABLE), error
+    for error in (primary_error, fallback_error):
+        if isinstance(error, NoTranscriptError):
+            return NoTranscriptError(MESSAGE_NO_TRANSCRIPT), error
+    return YouTubeNetworkError(MESSAGE_NETWORK), fallback_error
 
 
 def _caption_tracks(info: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -587,7 +733,9 @@ def _text(value: object) -> str:
 
 __all__ = [
     "DEFAULT_LANGUAGES",
+    "DEFAULT_TRANSCRIPT_TIMEOUT",
     "FallbackClient",
+    "FallbackVideo",
     "NoTranscriptError",
     "NotYouTubeURLError",
     "SOURCE_TRANSCRIPT_API",

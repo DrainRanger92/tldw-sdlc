@@ -53,7 +53,31 @@
 - Долг: +1 процессный пункт, который не про код и не должен повторяться в
   T-014…T-018 (`review-debt-accumulates.md`).
 
+## Цикл 14: ошибка не повторилась — таблица в диффе
+
+T-014 учла урок: разработчик сразу положил таблицу аудита в
+`app/memory/facts/t014-debt-audit.md` (+62 строки), сделал `git add -N` и
+назвал путь в отчёте. Ревьюер увидел файл в diffstat, сверил каждый из 10
+пунктов T-003 с кодом и тестами и **не записал P2 за «не подтверждено»**;
+единственный P2 был про `requests` в `pyproject.toml`, содержательный. Это
+первое подтверждение, что носитель артефакта в диффе решает проблему:
+
+- **формат:** `app/memory/facts/tNNN-debt-audit.md` с таблицей
+  «пункт → статус → доказательство» работает; EXECUTE создаёт файл, LEARN
+  дополняет его итогом ревью и индексом;
+- **стоимость:** +62 строки в диффе и 0 шагов на поиск у ревьюера против
+  P2 + 3–5 шагов в T-013;
+- **граница:** файл памяти в диффе — это EXECUTE-артефакт, а не «LEARN
+  меняет код»; правило «LEARN только память/скилы» не нарушено, потому что
+  файл создан разработчиком и попал в коммит задачи. В `MEMORY.md` строку
+  добавляет LEARN (в T-014 ревьюер заметил её отсутствие — P3, закрыто в
+  LEARN).
+- **для T-015…T-018:** сохранить этот формат; критерий «таблица в отчёте»
+  заменить на «файл `facts/tNNN-debt-audit.md` в диффе + строка в индексе
+  (LEARN)», иначе P2 вернётся.
+
 Связанные: `t013-debt-audit.md`, `t013-review-issues.md`,
-`cycle-13-spend.md`, `planning-overhead-duplicate-analyze.md`,
-`review-debt-accumulates.md`,
-`adr-018-review-debt-spec-audit.md`, `app/skills/review-handoff/SKILL.md`.
+`t014-debt-audit.md`, `t014-review-issues.md`, `cycle-13-spend.md`,
+`cycle-14-spend.md`, `planning-overhead-duplicate-analyze.md`,
+`review-debt-accumulates.md`, `adr-018-review-debt-spec-audit.md`,
+`app/skills/review-handoff/SKILL.md`.

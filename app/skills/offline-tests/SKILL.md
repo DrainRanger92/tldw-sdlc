@@ -9,8 +9,9 @@ description: Как писать тесты TLDW без сети и токено
 T-003 (YouTube-адаптер), T-004 (LLM-адаптер), T-005 (сервис конспекта),
 T-006 (Telegram-обработчик), T-007 (политика доступа), T-008 (ошибки и
 логи), T-009 (сквозной E2E и README), T-010 (шаблонный сценарий, 457 новых
-кейсов за цикл), T-011 (адаптер распознавания речи, 52 кейса) и T-012
-(голосовой обработчик 15 кейсов + 5 сквозных). В T-003 он дал 47 новых тестов без сети, токенов и `tmp_path`; в
+кейсов за цикл), T-011 (адаптер распознавания речи, 52 кейса), T-012
+(голосовой обработчик 15 кейсов + 5 сквозных) и T-014 (92 кейса
+YouTube-адаптера, +45). В T-003 он дал 47 новых тестов без сети, токенов и `tmp_path`; в
 T-004 — 49 новых тестов (48 адаптера плюс тест упаковки); в T-005 — 45 новых
 кейсов, из которых часть пишет файлы в `tmp_path`; в T-006 — 21 кейс на
 фейковой сессии aiogram (13 без `tmp_path`); в T-007 — 27 кейсов, включая 15
@@ -25,7 +26,8 @@ README, минус переписанные кейсы обработчика); 
 (`test_voice_handler.py` 15 + `test_voice_e2e.py` 5) и +14 в существующих
 файлах; в T-013 — **84 нетто** в четырёх файлах (`test_llm_adapter.py` 68
 кейсов, `test_speech_adapter.py` 80, плюс конфиг и сервис), новых файлов
-нет. Всего в наборе **1011 тестов** в 28 файлах.
+нет; в T-014 — **45 нетто** в одном файле `test_youtube_adapter.py`
+(92 кейса, было 47). Всего в наборе **1056 тестов** в 28 файлах.
 
 ## Когда применять
 
@@ -323,7 +325,8 @@ T-008 добавила `tests/test_errors.py` — чистый модуль бе
 перестановка приватных помощников ломает тесты. Предпочтительно:
 
 - проверять публичное поведение (`parse_video_id`, `YouTubeAdapter.fetch`,
-  `YtDlpClient.fetch_transcript`) через фейки;
+  `YtDlpClient.fetch`) через фейки; `FallbackClient.fetch` возвращает
+  `FallbackVideo` — фейк должен отдавать и транскрипт, и метаданные;
 - если чистый парсер нужен снаружи — сделать его публичным осознанно, а не
   импортировать `_name`;
 - monkeypatch приватного метода допустим только как временный компромисс и
@@ -344,6 +347,40 @@ T-004 использует только публичный `httpx` (`Client`, `M
 наследуется от `HTTPError` — тест на битый `base_url` должен ожидать
 `LLMError`, а не «любую ошибку httpx».
 
+## YouTube-адаптер: фейковый `YoutubeDL`, таймаут-сессия и один `extract_info`
+
+T-014 расширила офлайновый путь для адаптера, который не на httpx:
+
+- **Подменяйте библиотечную границу, а не приватные методы.** Тесты
+  `YtDlpClient` подменяют `tldw.adapters.youtube.YoutubeDL` фейком и
+  проверяют публичные `fetch`/`fetch_metadata`; monkeypatch `_extract_info`/
+  `_read_caption` убран (P3 T-003). `FakeYoutubeDL.instances` — список
+  созданных экземпляров с `options`/`extract_calls`; **не держите его
+  классовым мутабельным состоянием**, сбрасывайте фикстурой, иначе кейсы
+  протекут друг в друга (P3 T-014).
+- **Один `extract_info` проверяйте счётчиком:** сумма `extract_calls == 1`
+  и на fallback-пути, и при успехе primary (там `fetch_metadata` делает одно
+  извлечение, а не второе); `metadata_calls == []` после fallback.
+- **Таймаут до транспорта:** `TranscriptApiClient` принимает
+  `_TimeoutSession`; тест подсовывает записывающий адаптер и проверяет, что
+  в `send(timeout=...)` пришло заданное число. Значения `0/−1/inf/nan/str/
+  bool/None` — `TypeError`/`ValueError`; для `socket_timeout` набор уже
+  (P3 T-014 — добавить `None`/`bool`/отрицательное).
+- **Битый ответ библиотеки** (`None`, dict 0.x, строка, не-итерация, битые
+  числа) → `YouTubeNetworkError`, а не `TypeError`; `list(fetched)` может
+  бросить не только `TypeError` — ловите шире (P3 T-014).
+- **Матрица приоритетов:** 9 сочетаний primary/fallback проверяют итоговую
+  ошибку, а `__cause__` — что причина указывает на источник, определивший
+  итог. Это дешевле, чем проверять по одному сценарию.
+- **«Кэш ничего не пишет»** — единственный кейс с `tmp_path`: подменить
+  `XDG_CACHE_HOME`/`HOME` на `tmp_path` и вызвать настоящий
+  `YoutubeDL(options).cache.store(...)`; в read-only он не исполняется,
+  поэтому доказательство дублируется ручной проверкой `Cache.enabled is
+  False` на ревью.
+- `requests` — транзитивная зависимость библиотеки; прямой импорт в адаптере
+  требует строки в `pyproject.toml` (P2 T-014). Тест упаковки стоит
+  расширить, чтобы ловить такие импорты, а не только `package-data`.
+
 ## Обязательные проверки
 
 ```bash
@@ -357,10 +394,10 @@ cd app
 Тесты без файловых операций (как `test_youtube_adapter.py`,
 `test_llm_adapter.py`, `test_access.py`, `test_errors.py` и `test_readme.py`)
 не используют `tmp_path` и потому проходят даже в read-only песочнице
-ревьюера. После T-013 полный набор — **1011 тестов в 28 файлах**; файлы
+ревьюера. После T-014 полный набор — **1056 тестов в 28 файлах**; файлы
 адаптеров (включая `test_speech_adapter.py` — 80 кейсов,
-`test_llm_adapter.py` — 68), `test_access.py`,
-`test_errors.py`, `test_readme.py`, `test_template.py`,
+`test_llm_adapter.py` — 68, `test_youtube_adapter.py` — 92),
+`test_access.py`, `test_errors.py`, `test_readme.py`, `test_template.py`,
 `test_template_parser.py`, `test_template_handler.py` (30 сценариев FSM) и
 `test_voice_handler.py` (15 кейсов) проходят в read-only целиком или почти
 целиком, а `test_storage_templates.py`, `test_summary_templates.py`,
@@ -377,7 +414,9 @@ env-errors из 927 (76 %)**, `test_voice_handler.py` 15/15, `test_readme.py`
 41/41, `test_voice_e2e.py` не исполнялся; **в цикле 13 — 753 passed + 258
 env-errors из 1011 (74,5 %)**, `test_llm_adapter.py` 68/68 и
 `test_speech_adapter.py` 80/80, а новые кейсы `test_config`/
-`test_summary_service` с `tmp_path` — нет. Поэтому сценарные кейсы, которым
+`test_summary_service` с `tmp_path` — нет; **в цикле 14 — 797 passed + 259
+env-errors из 1056 (75,5 %)**, `test_youtube_adapter.py` — 91 из 92, «кэш
+ничего не пишет» не исполнялся. Поэтому сценарные кейсы, которым
 нужен `tmp_path`, оставляйте гейту VERIFY, а в read-only проверяйте чистые
 функции и не-файловые ветки.
 
@@ -409,6 +448,10 @@ env-errors из 1011 (74,5 %)**, `test_llm_adapter.py` 68/68 и
   `MockTransport`, multipart и приватность логов.
 - `app/memory/facts/cycle-12-spend.md` — 20 новых кейсов T-012, 927 тестов,
   `FakeSession` с аудио и E2E, который не идёт в read-only.
+- `app/memory/facts/cycle-14-spend.md` — 92 кейса `test_youtube_adapter.py`,
+  таймаут-сессия, один `extract_info`, 1056 тестов.
+- `app/memory/facts/t014-review-issues.md` — P3 тестов T-014: узкий
+  `except TypeError`, `FakeYoutubeDL.instances`, неполный `socket_timeout`.
 - `app/memory/decisions/adr-016-voice-input-flow.md` — голосовой путь и его
   проверки.
 - `app/memory/decisions/adr-015-speech-adapter.md` — контракт адаптера речи.

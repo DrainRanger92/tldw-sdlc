@@ -14,7 +14,7 @@
 |---|---|---|---|---|
 | 4 (T-004) | `adapters/llm.py` | `LLMAdapter` | `httpx.InvalidURL` и `RuntimeError` отсутствующего ресурса выходят мимо `LLMError`; ловится только `HTTPError` | **P1, закрыт в цикле 13** |
 | 11 (T-011) | `adapters/speech.py` | `SpeechAdapter.transcribe` | `SPEECH_BASE_URL=https://x.test:bad/v1` проходит `load_settings` и конструктор; `transcribe()` поднимает сырой `httpx.InvalidURL`, не `SpeechError`; `_make_client()` вне `try` | **P2, закрыт в цикле 13** |
-| 3 (T-003) | `adapters/youtube.py` | `YoutubeAdapter` | родственный класс: `TypeError` вместо `YouTubeNetworkError` при неверном ответе библиотеки | P1, открыт (T-014) |
+| 3 (T-003) | `adapters/youtube.py` | `YouTubeAdapter` | родственный класс: `TypeError` вместо `YouTubeNetworkError` при неверном ответе библиотеки | **P1, закрыт в цикле 14** (`_segments_from_fetched`) |
 
 Оба HTTP-адаптера повторяют одну форму: `try: client.post(...) except
 httpx.TimeoutException ... except httpx.HTTPError ...`. `InvalidURL`
@@ -73,12 +73,14 @@ T-013 закрыла дыру в обоих HTTP-адаптерах и сдел�
 - тесты: 8+ битых URL × два адаптера на уровне конфига, `InvalidURL`/
   `ValueError` на уровне запроса, отсутствующий ресурс, пустой транскрипт.
 
-**Осталось:** YouTube-адаптер (T-014) — `TypeError` вместо
-`YouTubeNetworkError`, таймаут, двойной `_extract_info`, кэш yt-dlp;
-`except (InvalidURL, ValueError)` в LLM/речи широк и ловит `ValueError`
-сериализации; `_media_type` кидает plain `ValueError` на неизвестный MIME.
-Это уже не «сырой `InvalidURL`», а границы того же контракта
-(`t013-review-issues.md`).
+**Осталось:** YouTube-адаптер закрыт в цикле 14 (нормализация
+`_segments_from_fetched`, `DownloadError` по маркерам, таймаут сессии —
+`adr-019-youtube-fetch-reliability.md`); `except (InvalidURL, ValueError)` в
+LLM/речи широк и ловит `ValueError` сериализации; `_media_type` кидает plain
+`ValueError` на неизвестный MIME; `_segments_from_fetched` ловит только
+`TypeError` из `list(fetched)` (P3 T-014). Это уже не «сырой `InvalidURL`»,
+а границы того же контракта (`t013-review-issues.md`,
+`t014-review-issues.md`).
 
 
 Связанные: `t004-review-issues.md`, `t011-review-issues.md`,
