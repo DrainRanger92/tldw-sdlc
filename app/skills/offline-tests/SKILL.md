@@ -8,14 +8,18 @@ description: Как писать тесты TLDW без сети и токено
 Паттерн взят из T-001 (конфиг и сборка), повторён в T-002 (модель заметки),
 T-003 (YouTube-адаптер), T-004 (LLM-адаптер), T-005 (сервис конспекта),
 T-006 (Telegram-обработчик), T-007 (политика доступа), T-008 (ошибки и
-логи) и T-009 (сквозной E2E и README). В T-003 он дал 47 новых тестов без сети, токенов и `tmp_path`; в
+логи), T-009 (сквозной E2E и README) и T-010 (шаблонный сценарий, 457 новых
+кейсов за цикл). В T-003 он дал 47 новых тестов без сети, токенов и `tmp_path`; в
 T-004 — 49 новых тестов (48 адаптера плюс тест упаковки); в T-005 — 45 новых
 кейсов, из которых часть пишет файлы в `tmp_path`; в T-006 — 21 кейс на
 фейковой сессии aiogram (13 без `tmp_path`); в T-007 — 27 кейсов, включая 15
 чистых тестов политики без aiogram и файлов; в T-008 — 34 кейса (26 в новом
 `test_errors.py` + 9 сквозных в `test_link_handler.py` минус один
 переписанный); в T-009 — 28 нетто (5 сквозных в `test_e2e.py` + 23 проверки
-README, минус переписанные кейсы обработчика). Всего в наборе **371 тест**.
+README, минус переписанные кейсы обработчика); в цикле 10 — **457 нетто**
+(десять новых файлов, из них `test_template_handler.py` 30 сценариев,
+`test_template_e2e.py` 9 кейсов, `test_template_errors.py`, `test_wiring.py`).
+Всего в наборе **828 тестов** в 25 файлах.
 
 ## Когда применять
 
@@ -112,6 +116,36 @@ T-009 добавила `tests/test_e2e.py`: сообщение проходит 
 - ошибки гоняйте тем же путём (чужой ID, нет субтитров, длинное видео,
   `LLMError`) — так проверяется, что обработчик действительно доводит
   типизированное исключение до текста, а не только что сервис его кинул.
+
+## Сценарий шаблона: FSM, in-memory репозиторий и `build_application`
+
+T-007/T-010 добавили третий тип сценария — диалог с состоянием. Рецепт,
+который работает офлайн:
+
+- FSM — `MemoryStorage`, состояния `waiting_description` →
+  `confirming_candidate` → `confirming_reset`; в тестах не нужно чистить
+  диск между кейсами;
+- кандидат хранится в FSM примитивами (`sections`, `tone`), а не моделью:
+  тест на перезапуск — новый `build_application` с тем же `DATA_DIR`, старый
+  `MemoryStorage` потерян; активный шаблон при этом сохраняется;
+- репозиторий шаблонов подменяется in-memory реализацией протокола
+  `TemplateRepository` (`load`/`save`/`delete`), настоящий `TemplateStore`
+  проверяется отдельно на `tmp_path` (roundtrip, битый JSON, атомарность);
+- **сквозной E2E — через `build_application(settings)`**: настоящие
+  `Dispatcher`, `TemplateHandler`, `LinkHandler`, `TemplateService`,
+  `SummaryService`, `storage`; фейки только на границах Telegram/YouTube/LLM
+  (`FakeSession`, `FakeVideoSource`, `FakeSummarizer` из `support.py`).
+  `run_message`/`on_request` позволяют проверить `.md` в момент отправки;
+- негативные кейсы: ссылка во время `waiting_description` не вызывает
+  YouTube/LLM; устаревшая кнопка не сохраняет дважды; ошибка записи
+  оставляет встроенный шаблон и не создаёт `.md`; ошибка разбора не меняет
+  активный шаблон;
+- **не заводите второй `Harness`/`FakeSession`** — T-010 переиспользовал
+  `tests/support.py`; второй каркас был P2 цикла 9.
+
+В read-only песочнице ревьюера FSM-сценарии без `tmp_path` проходят
+(в цикле 10 — 30 тестов `test_template_handler.py`), а E2E с `tmp_path` —
+нет; это учитывать в отчёте.
 
 ## README под тестами
 
@@ -282,16 +316,19 @@ cd app
 Тесты без файловых операций (как `test_youtube_adapter.py`,
 `test_llm_adapter.py`, `test_access.py`, `test_errors.py` и `test_readme.py`)
 не используют `tmp_path` и потому проходят даже в read-only песочнице
-ревьюера. После T-009 полный набор — **371 тест**; файлы адаптеров,
-`test_access.py`, `test_errors.py` и `test_readme.py` проходят в read-only
-целиком, а `test_summary_service.py`, `test_storage_notes.py`,
-`test_e2e.py` и часть `test_link_handler.py` — только частично: в цикле 7
-полный прогон дал 34 passed + 9 env-errors в двух файлах и 5 passed + 52
-env-errors в `test_config`/`test_bootstrap`/`test_cli`, в цикле 8 — 243 passed
-+ 93 env-errors из 343, в цикле 9 полный прогон недоступен, а `test_e2e.py`
-(главный артефакт) целиком упирается в `tmp_path`. Поэтому сценарные кейсы, которым нужен
-`tmp_path`, оставляйте гейту VERIFY, а в read-only проверяйте чистые функции
-и не-файловые ветки.
+ревьюера. После T-010 полный набор — **828 тестов в 25 файлах**; файлы
+адаптеров, `test_access.py`, `test_errors.py`, `test_readme.py`,
+`test_template.py`, `test_template_parser.py` и `test_template_handler.py`
+(30 сценариев FSM) проходят в read-only целиком или почти целиком, а
+`test_storage_templates.py`, `test_summary_templates.py`,
+`test_template_e2e.py`, `test_summary_service.py`, `test_storage_notes.py`,
+`test_e2e.py` и файловая часть `test_link_handler.py` — только частично: в
+цикле 7 полный прогон дал 34 passed + 9 env-errors в двух файлах и 5 passed +
+52 env-errors в `test_config`/`test_bootstrap`/`test_cli`, в цикле 8 — 243
+passed + 93 env-errors из 343, в цикле 9 полный прогон недоступен, в цикле
+10 — 158 passed из 828 (19 %), а оба E2E-файла и хранение шаблонов не
+исполнялись. Поэтому сценарные кейсы, которым нужен `tmp_path`, оставляйте
+гейту VERIFY, а в read-only проверяйте чистые функции и не-файловые ветки.
 
 ## Анти-паттерны
 

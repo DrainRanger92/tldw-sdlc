@@ -1,10 +1,12 @@
 """Проверки README и исходников: инструкция запуска и отсутствие секретов.
 
 Тесты читают только файлы, поэтому проходят без сети, токенов и ``tmp_path``.
-Они удерживают критерии T-009: README описывает установку, все переменные env,
-запуск и ручную проверку на реальной ссылке YouTube с ожидаемыми сообщениями,
-полный шаблон заметки, а настоящих токенов и ключей нет ни в документации,
-ни в коде, ни в тестах.
+Они удерживают критерии T-009 и T-010: README описывает установку, все
+переменные env, запуск и ручную проверку на реальной ссылке YouTube с
+ожидаемыми сообщениями, полный шаблон заметки, пользовательский шаблон
+(``/template``, кнопка «Шаблон», примеры разделов и тона, лимиты, хранение и
+сброс), а настоящих токенов и ключей нет ни в документации, ни в коде, ни в
+тестах.
 """
 
 from __future__ import annotations
@@ -18,7 +20,36 @@ from support import FAKE_SECRETS
 
 from tldw.config import ALL_ENV_VARS
 from tldw.handlers import MESSAGE_ACCEPTED, MESSAGE_DONE, MESSAGE_PROCESSING
+from tldw.handlers.template import (
+    BUTTON_CANCEL,
+    BUTTON_EDIT,
+    BUTTON_FIX,
+    BUTTON_RESET,
+    BUTTON_RESET_CONFIRM,
+    BUTTON_SAVE,
+    MESSAGE_LINK_WHILE_DESCRIPTION,
+    MESSAGE_ORIGIN_BUILTIN,
+    MESSAGE_ORIGIN_USER,
+    MESSAGE_RESET_ASK,
+    MESSAGE_RESET_DONE,
+    MESSAGE_SAVED,
+    MESSAGE_STALE_CANDIDATE,
+    MESSAGE_TONE_MISSING,
+    TEMPLATE_BUTTON_TEXT,
+)
 from tldw.services.note import FRONTMATTER_KEYS, SECTION_HEADINGS
+from tldw.services.template import (
+    MAX_DESCRIPTION_LENGTH,
+    MAX_HEADING_LENGTH,
+    MAX_SECTION_ITEMS,
+    MAX_SECTIONS,
+    MAX_TONE_LENGTH,
+    MIN_DESCRIPTION_LENGTH,
+    MIN_SECTION_ITEMS,
+    MIN_SECTIONS,
+)
+from tldw.storage import MESSAGE_TEMPLATE_STORAGE_FAILED
+from tldw.storage.templates import SCHEMA_VERSION, TEMPLATES_DIR_NAME
 
 APP_DIR = Path(__file__).resolve().parents[1]
 README = APP_DIR / "README.md"
@@ -41,6 +72,9 @@ _KNOWN_FAKE_SECRETS = frozenset(
 )
 
 _IGNORED_PARTS = frozenset({".venv", "data", "__pycache__"})
+
+#: Строка таблицы env: первый столбец с именем переменной.
+_ENV_TABLE_ROW = re.compile(r"^\| `([A-Z][A-Z0-9_]*)` \|", re.MULTILINE)
 
 
 def readme_text() -> str:
@@ -97,6 +131,73 @@ def test_readme_has_manual_check_with_real_youtube_link_and_messages() -> None:
     for heading in SECTION_HEADINGS:
         title = heading.removeprefix("## ")
         assert title in text, f"секция {title!r} не описана"
+
+
+def test_readme_describes_template_scenario() -> None:
+    """``/template``, кнопка «Шаблон», примеры разделов/тона и сообщения сценария."""
+    text = readme_text()
+
+    assert "/template" in text, "команда /template не описана"
+    for label in (
+        TEMPLATE_BUTTON_TEXT,
+        BUTTON_EDIT,
+        BUTTON_RESET,
+        BUTTON_RESET_CONFIRM,
+        BUTTON_SAVE,
+        BUTTON_FIX,
+        BUTTON_CANCEL,
+    ):
+        assert label in text, f"кнопка {label!r} не описана"
+    for message in (
+        MESSAGE_ORIGIN_BUILTIN,
+        MESSAGE_ORIGIN_USER,
+        MESSAGE_TONE_MISSING,
+        MESSAGE_SAVED,
+        MESSAGE_RESET_ASK,
+        MESSAGE_RESET_DONE,
+        MESSAGE_LINK_WHILE_DESCRIPTION,
+        MESSAGE_STALE_CANDIDATE,
+        MESSAGE_TEMPLATE_STORAGE_FAILED,
+    ):
+        assert message in text, f"сообщение сценария {message!r} не описано"
+
+    assert "Разделы:" in text, "нужен пример описания разделов"
+    assert "Тон:" in text, "нужен пример тона"
+    assert "Примеры кода" in text, "нужен пример пользовательского раздела"
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        f"{MIN_SECTIONS}–{MAX_SECTIONS}",
+        str(MAX_HEADING_LENGTH),
+        str(MAX_TONE_LENGTH),
+        f"{MIN_DESCRIPTION_LENGTH}–{MAX_DESCRIPTION_LENGTH}",
+        f"{MIN_SECTION_ITEMS}–{MAX_SECTION_ITEMS}",
+    ],
+    ids=["sections", "heading-length", "tone-length", "description", "items"],
+)
+def test_readme_documents_template_limits(fragment: str) -> None:
+    """Числа лимитов README совпадают с константами кода, а не живут отдельно."""
+    assert fragment in readme_text(), f"лимит {fragment!r} не описан в README"
+
+
+def test_readme_documents_where_templates_are_stored() -> None:
+    text = readme_text()
+
+    assert TEMPLATES_DIR_NAME in text
+    assert f"<DATA_DIR>/{TEMPLATES_DIR_NAME}/<telegram_user_id>.json" in text
+    assert f'"version": {SCHEMA_VERSION}' in text, "формат файла шаблона не описан"
+
+
+def test_readme_env_table_lists_exactly_known_variables() -> None:
+    """Текстовый сценарий не добавляет обязательных env: таблица ровно из конфига."""
+    documented = set(_ENV_TABLE_ROW.findall(readme_text()))
+
+    assert documented == set(ALL_ENV_VARS), (
+        "README описывает не те переменные env, которые читает конфиг: "
+        f"лишние {documented - set(ALL_ENV_VARS)}, пропущены {set(ALL_ENV_VARS) - documented}"
+    )
 
 
 @pytest.mark.parametrize("pattern", _SECRET_PATTERNS, ids=["telegram-token", "sk-key", "bearer"])

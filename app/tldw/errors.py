@@ -16,7 +16,15 @@
 - любая запись в лог проходит через :func:`sanitize_log_text`: вырезаются
   токены и ключи API (включая ``Authorization: Bearer`` и значения переменных
   вида ``LLM_API_KEY=…``), а длинные фрагменты ограничиваются, поэтому полный
-  транскрипт в лог не попадает.
+  транскрипт в лог не попадает;
+- у записи есть необязательный **контекст**: по умолчанию это «обработки
+  видео» (прежний текст цикла T-008), а сценарий шаблона передаёт «разбора
+  шаблона (пользовательский, разделов: 2)», поэтому сбой говорит о шаблоне, а
+  не о видео, и не раскрывает текст шаблона;
+- здесь же живут нейтральные ошибки шаблона заметки
+  (:class:`TemplateParseError`, :class:`TemplateValidationError`): их
+  поднимает и домен шаблона, и LLM-адаптер, который по ADR-002 не импортирует
+  ``services``.
 
 Почему стектрейс форматируется вручную, а не через ``log.exception``:
 стандартный ``exc_info`` обошёл бы очистку, а сообщение исключения или URL
@@ -38,6 +46,10 @@ log = logging.getLogger(__name__)
 MESSAGE_UNEXPECTED: Final = "Не удалось обработать видео. Попробуйте позже."
 #: Чем заменяются секреты в логе.
 REDACTED: Final = "[скрыто]"
+#: Контекст сбоя по умолчанию: прежний текст записи для старых вызовов.
+DEFAULT_FAILURE_CONTEXT: Final = "обработки видео"
+#: Предел длины контекста в логе (символов): контекст — короткая пометка.
+MAX_CONTEXT_CHARS: Final = 120
 #: Предел длины одного фрагмента причины в логе (символов).
 MAX_LOG_FIELD_CHARS: Final = 500
 #: Предел длины строки стектрейса: защита от транскрипта в тексте исключения.
@@ -92,6 +104,24 @@ class UserFacingError(Exception):
     """
 
 
+class TemplateParseError(UserFacingError):
+    """Из описания или правки не удалось собрать изменения шаблона.
+
+    Живёт в нейтральном ``errors.py``, а не в ``services/template.py``:
+    LLM-адаптер разбирает описание шаблона и поднимает эту ошибку, но по
+    ADR-002 не импортирует сервисный слой. Домен шаблона реэкспортирует её,
+    поэтому ``tldw.services.template.TemplateParseError`` — тот же класс.
+    """
+
+
+class TemplateValidationError(UserFacingError):
+    """Шаблон не прошёл валидацию; текст сообщения безопасен для пользователя.
+
+    Определена здесь по тем же причинам, что и :class:`TemplateParseError`:
+    ошибка нужна и домену шаблона, и слоям, которые его не импортируют.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ErrorReport:
     """Готовый разбор сбоя: что ответить пользователю и что записать в лог.
@@ -101,55 +131,89 @@ class ErrorReport:
     :param level: уровень логирования: ``WARNING`` для известных ошибок,
         ``ERROR`` для неизвестного сбоя.
     :param traceback_text: очищенный стектрейс; только для неизвестных сбоев.
+    :param context: о чём запись в логе — «обработки видео» по умолчанию или
+        «разбора шаблона (…, разделов: 2)» у шаблонного сценария.
     """
 
     user_message: str
     reason: str
     level: int = logging.WARNING
     traceback_text: str | None = None
+    context: str = DEFAULT_FAILURE_CONTEXT
 
 
-def describe_error(exc: BaseException) -> ErrorReport:
+def describe_error(exc: BaseException, *, context: str | None = None) -> ErrorReport:
     """Свести исключение к ответу пользователю и безопасной записи в лог.
 
     Известные ошибки (:class:`UserFacingError`) отдают своё сообщение и
     причину на уровне ``WARNING``. Всё остальное — общее сообщение и
     ``ERROR`` со стектрейсом, очищенным от секретов и длинных фрагментов.
+
+    :param context: необязательная пометка, о чём сбой («разбора шаблона»).
+        ``None`` и пустая строка дают прежнее «обработки видео», поэтому старые
+        вызовы и тексты не меняются. Пометка очищается как любой текст лога.
     """
     reason = format_reason(exc)
+    failure_context = format_context(context)
     if isinstance(exc, UserFacingError):
         return ErrorReport(
             user_message=safe_user_message(exc),
             reason=reason,
             level=logging.WARNING,
+            context=failure_context,
         )
     return ErrorReport(
         user_message=MESSAGE_UNEXPECTED,
         reason=reason,
         level=logging.ERROR,
         traceback_text=format_traceback(exc),
+        context=failure_context,
     )
 
 
-def log_failure(exc: BaseException, *, logger: logging.Logger | None = None) -> ErrorReport:
+def log_failure(
+    exc: BaseException,
+    *,
+    logger: logging.Logger | None = None,
+    context: str | None = None,
+) -> ErrorReport:
     """Записать сбой в лог и вернуть разбор для ответа пользователю.
 
     Известная ошибка логируется одним сообщением с причиной, неизвестная —
     на уровне ``ERROR`` с очищенным стектрейсом. Ни сообщение, ни лог не
     содержат токенов, ключей API и полного транскрипта.
+
+    :param logger: логгер вызывающего слоя; по умолчанию — ``tldw.errors``.
+    :param context: о чём сбой; ``None`` сохраняет прежнее «Сбой обработки
+        видео», сценарий шаблона передаёт «разбора шаблона (…, разделов: 2)».
     """
-    report = describe_error(exc)
+    report = describe_error(exc, context=context)
     target = log if logger is None else logger
     if report.traceback_text is None:
-        target.log(report.level, "Сбой обработки видео: %s", report.reason)
+        target.log(report.level, "Сбой %s: %s", report.context, report.reason)
     else:
         target.log(
             report.level,
-            "Неизвестный сбой обработки видео: %s\n%s",
+            "Неизвестный сбой %s: %s\n%s",
+            report.context,
             report.reason,
             report.traceback_text,
         )
     return report
+
+
+def format_context(context: str | None) -> str:
+    """Нормализовать контекст сбоя для записи в лог.
+
+    Пустой или отсутствующий контекст даёт :data:`DEFAULT_FAILURE_CONTEXT`,
+    поэтому старые вызовы пишут прежний текст. Остальное очищается как любой
+    текст лога (секреты, одна строка, предел длины) и не может добавить
+    перевод строки в запись.
+    """
+    if context is None:
+        return DEFAULT_FAILURE_CONTEXT
+    text = sanitize_log_text(context, max_length=MAX_CONTEXT_CHARS).strip(" :")
+    return text or DEFAULT_FAILURE_CONTEXT
 
 
 def safe_user_message(exc: UserFacingError) -> str:
@@ -254,15 +318,20 @@ def _redact(text: str) -> str:
 
 
 __all__ = [
+    "DEFAULT_FAILURE_CONTEXT",
     "ErrorReport",
+    "MAX_CONTEXT_CHARS",
     "MAX_LOG_FIELD_CHARS",
     "MAX_TRACEBACK_CHARS",
     "MAX_TRACEBACK_LINE_CHARS",
     "MAX_USER_MESSAGE_CHARS",
     "MESSAGE_UNEXPECTED",
     "REDACTED",
+    "TemplateParseError",
+    "TemplateValidationError",
     "UserFacingError",
     "describe_error",
+    "format_context",
     "format_reason",
     "format_traceback",
     "log_failure",

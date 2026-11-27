@@ -37,6 +37,7 @@ from youtube_transcript_api import (
 from yt_dlp import YoutubeDL
 
 from tldw.errors import UserFacingError
+from tldw.text import one_line
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ class TranscriptSegment:
     duration_seconds: float = 0.0
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "text", _one_line(_text(self.text)))
+        object.__setattr__(self, "text", one_line(_text(self.text)))
         object.__setattr__(self, "start_seconds", _seconds(self.start_seconds, "start_seconds"))
         object.__setattr__(
             self, "duration_seconds", _seconds(self.duration_seconds, "duration_seconds")
@@ -167,8 +168,8 @@ class VideoMetadata:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "video_id", _text(self.video_id))
-        object.__setattr__(self, "title", _one_line(_text(self.title)))
-        object.__setattr__(self, "channel", _one_line(_text(self.channel)))
+        object.__setattr__(self, "title", one_line(_text(self.title)))
+        object.__setattr__(self, "channel", one_line(_text(self.channel)))
         duration = self.duration_seconds
         if duration is None:
             return
@@ -515,7 +516,7 @@ def _parse_json3(payload: bytes | str) -> tuple[TranscriptSegment, ...]:
         parts = event.get("segs")
         if not isinstance(parts, list):
             continue
-        text = _one_line(
+        text = one_line(
             "".join(_raw_text(part.get("utf8")) for part in parts if isinstance(part, dict))
         )
         if not text:
@@ -582,10 +583,6 @@ def _raw_text(value: object) -> str:
 
 def _text(value: object) -> str:
     return "" if value is None else str(value).strip()
-
-
-def _one_line(value: str) -> str:
-    return " ".join(value.split())
 
 
 __all__ = [

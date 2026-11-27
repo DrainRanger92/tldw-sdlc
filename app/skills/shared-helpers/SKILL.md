@@ -5,7 +5,7 @@ description: Как не плодить третьи копии текстовы
 
 # Общие помощники и единый источник лимитов
 
-Паттерн повторялся в циклах 2, 3 и 4. Ревью T-002 отметило дублирование
+Паттерн повторялся в циклах 2, 3, 4 и 10. Ревью T-002 отметило дублирование
 `_text`/`_one_line` с `services/note.py`; T-003 повторил это в
 `adapters/youtube.py`; T-004 добавил **третью** копию `_one_line` в
 `adapters/llm.py` и `_format_seconds`, повторяющий логику
@@ -170,11 +170,36 @@ T-008 свела `safe_user_message` и `sanitize_log_text` к общему `_co
 `tests/conftest.py`, иначе формы секретов в тестах расходятся, а тест
 очистки проверяет не тот шаблон (см. `secret-redaction-tests.md`).
 
+## Цикл 10: `text.py` появился, но лимиты снова разошлись
+
+Батч-инкремент 002 частично закрыл старый долг и добавил новый:
+
+- **хорошо:** `_one_line` наконец вынесен в `tldw/text.py` (нейтральный
+  модуль), `services/template.py` и `storage/templates.py` импортируют его;
+  четвёртой копии нет. Общий `storage/atomic.py` убрал дубль атомарной
+  записи заметок и шаблонов; `tests/support.py` переиспользован новыми
+  E2E-тестами, второй `Harness` не появился.
+- **плохо:** лимиты пунктов объявлены в `services/template.py`
+  (`MIN_SECTION_ITEMS`, `MAX_SECTION_ITEMS`), но реальная проверка — в
+  `adapters/llm.py` (свои `MIN_CUSTOM_SECTION_ITEMS`/`MAX_...`); доменные
+  константы не используются, это второй источник истины (P3).
+- **плохо:** метки «встроенный/пользовательский» продублированы в
+  `services/summary.py` и `handlers/template.py`; почти одинаковые блоки
+  `_template_current_sections`/`_tone_text`/`_sections_block` и
+  `_requested_sections` есть в одном `adapters/llm.py` (P3).
+- **правило для нового домена:** если валидатор живёт в адаптере (чтобы не
+  импортировать `services`), константы лимитов должны быть **в нейтральном
+  модуле** (`text.py`, `limits.py`), а не в домене и не в адаптере. Иначе
+  появляется третий источник, который тесты сверяют вручную.
+- **проверка на ревью батча:** `grep -R "MIN_.*ITEMS\|MAX_.*ITEMS"` и
+  `grep -R "встроенный\|пользовательский"` — обе копии должны ссылаться на
+  один источник или быть осознанно разными (текст для пользователя vs лог).
+
 ## См. также
 
 - `app/memory/facts/t002-review-issues.md`, `t003-review-issues.md`,
-  `t004-review-issues.md`, `t005-review-issues.md`, `t007-review-issues.md` —
-  история замечаний.
+  `t004-review-issues.md`, `t005-review-issues.md`, `t007-review-issues.md`,
+  `t001-t010-review-issues.md` — история замечаний.
 - `app/memory/facts/review-debt-accumulates.md` — почему долг не закрывается
   сам.
 - `app/memory/decisions/adr-002-layered-adapters.md` — границы слоёв.

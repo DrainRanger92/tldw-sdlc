@@ -11,7 +11,11 @@
 - доступ по allowlist: разрешённый ID обрабатывается, чужой получает «доступ
   закрыт» до разбора ссылки и вызовов сервиса, пустой список пропускает всех;
 - ``.md`` лежит в ``DATA_DIR`` до отправки и уходит документом с именем
-  из шаблона заметки.
+  из шаблона заметки;
+- активный шаблон отправителя доходит до сервиса конспекта, встроенный путь
+  остаётся байт-в-байт прежним, сбой хранилища и повреждённый файл деградируют
+  до встроенного шаблона с ``WARNING``, а шаблон одного пользователя не
+  применяется к заметке другого (T-008).
 """
 
 from __future__ import annotations
@@ -33,8 +37,10 @@ from support import (
     FAKE_ENV_KEY,
     VIDEO_URL,
     FakeSummarizer,
+    FakeTemplateRepository,
     FakeVideoSource,
     make_harness,
+    make_result,
     make_summary,
     make_video,
     request_types,
@@ -60,7 +66,7 @@ from tldw.handlers import (
     create_router,
     extract_first_url,
 )
-from tldw.services.note import Note, note_filename
+from tldw.services.note import SECTION_HEADINGS, Note, note_filename
 from tldw.services.summary import (
     MESSAGE_VIDEO_TOO_LONG,
     SummaryResult,
@@ -68,21 +74,34 @@ from tldw.services.summary import (
     TranscriptText,
     VideoTooLongError,
 )
+from tldw.services.template import ActiveTemplate, NoteTemplate, TemplateOrigin, TemplateService
+from tldw.storage import TemplateStore
 
 
 @dataclass
 class FakeSummaryService:
-    """Фейковый сервис конспекта: результат, ошибка и запись вызовов."""
+    """Фейковый сервис конспекта: результат, ошибка и запись вызовов.
+
+    ``templates`` хранит снимок шаблона, переданный обработчиком: ``None`` —
+    прежний встроенный путь MVP, ``ActiveTemplate`` — пользовательский шаблон.
+    """
 
     result: SummaryResult | None = None
     error: Exception | None = None
     started: threading.Event | None = None
     release: threading.Event | None = None
     calls: list[str] = field(default_factory=list)
+    templates: list[ActiveTemplate | None] = field(default_factory=list)
     thread_ids: list[int] = field(default_factory=list)
 
-    def process(self, url: str) -> SummaryResult:
+    def process(
+        self,
+        url: str,
+        *,
+        template: ActiveTemplate | None = None,
+    ) -> SummaryResult:
         self.calls.append(url)
+        self.templates.append(template)
         self.thread_ids.append(threading.get_ident())
         if self.started is not None:
             self.started.set()
@@ -92,20 +111,6 @@ class FakeSummaryService:
             raise self.error
         assert self.result is not None
         return self.result
-
-
-def make_result(tmp_path: Path, *, filename: str = "kak-uchitsya.md") -> SummaryResult:
-    """Результат сервиса с уже записанным файлом заметки."""
-    path = tmp_path / filename
-    markdown = "# Заметка\n"
-    path.write_text(markdown, encoding="utf-8")
-    return SummaryResult(
-        note=Note(title="Как учиться"),
-        markdown=markdown,
-        filename=filename,
-        transcript=TranscriptText(),
-        path=path,
-    )
 
 
 def test_success_flow_sends_accepted_processing_document_and_done(tmp_path: Path) -> None:
@@ -473,3 +478,358 @@ def test_note_is_saved_in_data_dir_before_sending(fake_env: dict[str, str]) -> N
     assert document.document.filename == expected_path.name
     assert "## TL;DR" in expected_path.read_text(encoding="utf-8")
     assert file_existed_at_send == [True]
+
+
+# --- Активный шаблон в обработчике ссылки (T-008) ---------------------------
+
+#: Пользовательский шаблон сценария: разделы в порядке применения и тон.
+SAVED_TEMPLATE = NoteTemplate(sections=("Коротко", "Примеры кода"), tone="короче")
+#: Другой шаблон — проверка «пока не сменён».
+CHANGED_TEMPLATE = NoteTemplate(sections=("Что попробовать",), tone="строго по делу")
+
+
+class BrokenTemplateRepository:
+    """Хранилище, чтение которого падает: проверка деградации до встроенного."""
+
+    def __init__(self) -> None:
+        self.loads = 0
+
+    def load(self, user_id: int) -> tuple[tuple[str, ...], str] | None:
+        self.loads += 1
+        raise OSError("каталог данных недоступен")
+
+    def save(self, user_id: int, record: tuple[tuple[str, ...], str]) -> None:
+        raise AssertionError("обработчик ссылки не должен сохранять шаблон")
+
+    def delete(self, user_id: int) -> None:
+        raise AssertionError("обработчик ссылки не должен сбрасывать шаблон")
+
+
+def saved_template_service(
+    user_id: int = 42,
+    template: NoteTemplate = SAVED_TEMPLATE,
+) -> tuple[TemplateService, FakeTemplateRepository]:
+    """Сервис шаблонов с заранее сохранённым шаблоном пользователя."""
+    repository = FakeTemplateRepository()
+    repository.records[user_id] = (template.sections, template.tone)
+    return TemplateService(repository), repository
+
+
+def sent_markdown(request: Any) -> tuple[Path, str]:
+    """Путь и содержимое `.md`, отправленного документом."""
+    assert isinstance(request, SendDocument)
+    path = Path(request.document.path)
+    return path, path.read_text(encoding="utf-8")
+
+
+def test_saved_template_is_passed_to_summary_service(tmp_path: Path) -> None:
+    """Снимок активного шаблона отправителя уходит в сервис конспекта."""
+    service = FakeSummaryService(result=make_result(tmp_path))
+    templates, repository = saved_template_service()
+
+    requests = run_message(
+        service,
+        VIDEO_URL,
+        user_id=42,
+        template_service=templates,
+    )
+
+    assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
+    assert requests[0].text == MESSAGE_ACCEPTED
+    assert requests[-1].text == MESSAGE_DONE
+    assert service.calls == [VIDEO_URL]
+
+    (template,) = service.templates
+    assert isinstance(template, ActiveTemplate)
+    assert template.sections == SAVED_TEMPLATE.sections
+    assert template.tone == SAVED_TEMPLATE.tone
+    assert template.origin is TemplateOrigin.USER
+    assert repository.loads == [42], "шаблон читается для отправителя ссылки"
+
+
+def test_without_user_template_the_mvp_path_is_byte_identical(
+    fake_env: dict[str, str],
+) -> None:
+    """Без пользовательского шаблона сообщения и `.md` те же, что без сервиса."""
+    settings = load_settings(fake_env)
+    repository = FakeTemplateRepository()
+    templates = TemplateService(repository)
+
+    def run(template_service: TemplateService | None) -> tuple[list[Any], str, Any]:
+        summarizer = FakeSummarizer(summary=make_summary())
+        service = SummaryService(
+            FakeVideoSource(video=make_video()),
+            summarizer,
+            data_dir=settings.data_dir,
+        )
+        requests = run_message(service, VIDEO_URL, template_service=template_service)
+        document = next(request for request in requests if isinstance(request, SendDocument))
+        _, markdown = sent_markdown(document)
+        return requests, markdown, summarizer
+
+    requests_with, markdown_with, llm_with = run(templates)
+    requests_without, markdown_without, llm_without = run(None)
+
+    assert request_types(requests_with) == request_types(requests_without)
+    assert [getattr(request, "text", None) for request in requests_with] == [
+        getattr(request, "text", None) for request in requests_without
+    ]
+    assert markdown_with == markdown_without
+    # На встроенном пути сервис вызывается без разделов и тона (прежний контракт).
+    assert llm_with.templates == [(None, "")]
+    assert llm_without.templates == [(None, "")]
+    assert repository.loads == [42], "хватило одного чтения шаблона на обработку"
+
+
+def test_template_storage_failure_degrades_to_builtin_with_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Сбой чтения хранилища не теряет ссылку: встроенный шаблон и ``WARNING``."""
+    repository = BrokenTemplateRepository()
+    service = FakeSummaryService(result=make_result(tmp_path))
+
+    with caplog.at_level(logging.WARNING, logger="tldw.handlers.link"):
+        requests = run_message(
+            service,
+            VIDEO_URL,
+            template_service=TemplateService(repository),
+        )
+
+    assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
+    assert requests[-1].text == MESSAGE_DONE
+    assert service.templates == [None], "при сбое применяется встроенный шаблон"
+    assert repository.loads == 1
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "tldw.handlers.link" and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "встроенный" in warnings[0].getMessage()
+    assert "OSError" in warnings[0].getMessage()
+    assert VIDEO_URL not in caplog.text, "ссылка не должна попадать в лог"
+
+
+def test_corrupt_saved_template_degrades_to_builtin_with_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Повреждённый файл шаблона даёт встроенный шаблон, ссылка обрабатывается."""
+    repository = FakeTemplateRepository()
+    repository.records[42] = ((), "")  # пустой список разделов — вне лимитов FR-2
+    service = FakeSummaryService(result=make_result(tmp_path))
+
+    with caplog.at_level(logging.WARNING, logger="tldw.services.template"):
+        requests = run_message(
+            service,
+            VIDEO_URL,
+            template_service=TemplateService(repository),
+        )
+
+    assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
+    assert service.templates == [None]
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "tldw.services.template" and record.levelno == logging.WARNING
+    ]
+    assert warnings, "повреждённый шаблон должен давать предупреждение"
+    assert "встроенный" in warnings[0].getMessage()
+
+
+def test_corrupt_template_file_in_data_dir_degrades_to_builtin(
+    fake_env: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Битый JSON в ``DATA_DIR`` даёт встроенный шаблон, ссылка обрабатывается."""
+    settings = load_settings(fake_env)
+    templates_dir = settings.data_dir / "templates"
+    templates_dir.mkdir(parents=True)
+    corrupt = templates_dir / "42.json"
+    corrupt.write_text('{"version": 1, "sections": [', encoding="utf-8")
+    service = FakeSummaryService(result=make_result(settings.data_dir))
+
+    with caplog.at_level(logging.WARNING, logger="tldw.storage.templates"):
+        requests = run_message(
+            service,
+            VIDEO_URL,
+            template_service=TemplateService(TemplateStore(settings.data_dir)),
+        )
+
+    assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
+    assert requests[-1].text == MESSAGE_DONE
+    assert service.templates == [None]
+    assert corrupt.is_file(), "повреждённый файл не удаляется молча"
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "tldw.storage.templates" and record.levelno == logging.WARNING
+    ]
+    assert warnings, "битый файл шаблона должен давать предупреждение"
+    assert "встроенный" in warnings[0].getMessage()
+
+
+def test_template_is_not_read_for_a_stranger(tmp_path: Path) -> None:
+    """Allowlist проверяется раньше чтения шаблона: чужой шаблон не читается."""
+    service = FakeSummaryService(result=make_result(tmp_path))
+    templates, repository = saved_template_service(user_id=42)
+
+    requests = run_message(
+        service,
+        VIDEO_URL,
+        allowed_user_ids=(1001,),
+        user_id=42,
+        template_service=templates,
+    )
+
+    assert request_types(requests) == [SendMessage]
+    assert requests[0].text == MESSAGE_ACCESS_DENIED
+    assert service.calls == []
+    assert repository.loads == [], "посторонний не должен читать шаблон"
+
+
+def test_message_without_sender_uses_builtin_without_lookup(tmp_path: Path) -> None:
+    """У сообщения из канала нет отправителя: шаблон не читается, путь встроенный."""
+    service = FakeSummaryService(result=make_result(tmp_path))
+    templates, repository = saved_template_service()
+
+    requests = run_message(
+        service,
+        VIDEO_URL,
+        with_sender=False,
+        template_service=templates,
+    )
+
+    assert request_types(requests) == [SendMessage, SendMessage, SendDocument, SendMessage]
+    assert service.templates == [None]
+    assert repository.loads == []
+
+
+def test_user_template_is_not_applied_to_another_user(
+    fake_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """Изоляция: шаблон A не попадает в заметку B, B получает заметку MVP-вида."""
+    settings = load_settings(fake_env)
+    repository = FakeTemplateRepository()
+    repository.records[42] = (SAVED_TEMPLATE.sections, SAVED_TEMPLATE.tone)
+    templates = TemplateService(repository)
+
+    def run_for(user_id: int, title: str, url: str) -> tuple[str, FakeSummarizer]:
+        summarizer = FakeSummarizer(summary=make_summary(), sections_from_request=True)
+        service = SummaryService.from_settings(
+            settings,
+            FakeVideoSource(video=make_video(title=title, url=url)),
+            summarizer,
+        )
+        requests = run_message(
+            service,
+            url,
+            user_id=user_id,
+            allowed_user_ids=(42, 1001),
+            template_service=templates,
+        )
+        document = next(request for request in requests if isinstance(request, SendDocument))
+        _, markdown = sent_markdown(document)
+        return markdown, summarizer
+
+    markdown_a, llm_a = run_for(42, "Урок пользователя A", VIDEO_URL)
+    markdown_b, llm_b = run_for(1001, "Урок пользователя B", "https://youtu.be/bbbbbbbbbbb")
+
+    # A: разделы своего шаблона в своём порядке.
+    assert llm_a.templates == [(SAVED_TEMPLATE.sections, SAVED_TEMPLATE.tone)]
+    positions = [markdown_a.index(f"## {heading}") for heading in SAVED_TEMPLATE.sections]
+    assert positions == sorted(positions)
+    assert "## TL;DR" not in markdown_a
+
+    # B: прежние пять секций MVP, чужой шаблон не применён.
+    assert llm_b.templates == [(None, "")]
+    for heading in SECTION_HEADINGS:
+        assert heading in markdown_b
+    for heading in SAVED_TEMPLATE.sections:
+        assert f"## {heading}" not in markdown_b
+
+    # Общее хранилище: у каждого пользователя свой ключ, готовых заметок две.
+    assert sorted(repository.loads) == [42, 1001]
+    assert sorted(path.name for path in settings.data_dir.glob("*.md")) == [
+        "урок-пользователя-a.md",
+        "урок-пользователя-b.md",
+    ]
+
+
+def test_open_allowlist_keeps_template_isolation(
+    fake_env: dict[str, str],
+) -> None:
+    """При пустом allowlist доступ открыт всем, изоляция по user ID сохраняется."""
+    settings = load_settings(fake_env)
+    repository = FakeTemplateRepository()
+    repository.records[42] = (SAVED_TEMPLATE.sections, SAVED_TEMPLATE.tone)
+    templates = TemplateService(repository)
+
+    def template_for(user_id: int) -> tuple[tuple[str, ...] | None, str]:
+        summarizer = FakeSummarizer(summary=make_summary(), sections_from_request=True)
+        service = SummaryService.from_settings(
+            settings,
+            FakeVideoSource(video=make_video(title=f"Урок {user_id}")),
+            summarizer,
+        )
+        run_message(service, VIDEO_URL, user_id=user_id, template_service=templates)
+        assert len(summarizer.templates) == 1
+        return summarizer.templates[0]
+
+    assert template_for(42) == (SAVED_TEMPLATE.sections, SAVED_TEMPLATE.tone)
+    assert template_for(1001) == (None, "")
+    assert repository.loads == [42, 1001]
+
+
+def test_template_stays_active_for_next_links_until_changed_or_reset(
+    fake_env: dict[str, str],
+) -> None:
+    """Сохранённый шаблон действует на все ссылки; готовые заметки не меняются."""
+    settings = load_settings(fake_env)
+    templates = TemplateService(FakeTemplateRepository())
+    templates.save(42, SAVED_TEMPLATE)
+
+    def run(title: str, url: str) -> tuple[Path, str, FakeSummarizer, FakeVideoSource]:
+        source = FakeVideoSource(video=make_video(title=title, url=url))
+        summarizer = FakeSummarizer(summary=make_summary(), sections_from_request=True)
+        service = SummaryService.from_settings(settings, source, summarizer)
+        requests = run_message(service, url, template_service=templates)
+        document = next(request for request in requests if isinstance(request, SendDocument))
+        path, markdown = sent_markdown(document)
+        return path, markdown, summarizer, source
+
+    first_path, first_markdown, first_llm, first_source = run("Первый урок", VIDEO_URL)
+    _, second_markdown, second_llm, _ = run(
+        "Второй урок", "https://youtu.be/bbbbbbbbbbb"
+    )
+    assert first_llm.templates == [(SAVED_TEMPLATE.sections, SAVED_TEMPLATE.tone)]
+    assert second_llm.templates == [(SAVED_TEMPLATE.sections, SAVED_TEMPLATE.tone)]
+    assert f"## {SAVED_TEMPLATE.sections[0]}" in second_markdown
+
+    # Смена шаблона действует на следующую ссылку.
+    templates.save(42, CHANGED_TEMPLATE)
+    _, third_markdown, third_llm, _ = run(
+        "Третий урок", "https://youtu.be/ccccccccccc"
+    )
+    assert third_llm.templates == [(CHANGED_TEMPLATE.sections, CHANGED_TEMPLATE.tone)]
+    assert f"## {CHANGED_TEMPLATE.sections[0]}" in third_markdown
+    assert f"## {SAVED_TEMPLATE.sections[0]}" not in third_markdown
+
+    # Сброс возвращает встроенный шаблон.
+    templates.reset(42)
+    fourth_path, fourth_markdown, fourth_llm, _ = run(
+        "Четвёртый урок", "https://youtu.be/ddddddddddd"
+    )
+    assert fourth_llm.templates == [(None, "")]
+    for heading in SECTION_HEADINGS:
+        assert heading in fourth_markdown
+
+    # Уже готовые заметки не перегенерируются: файл на месте и не изменился.
+    assert first_path.is_file()
+    assert first_path.read_text(encoding="utf-8") == first_markdown
+    assert "## TL;DR" not in first_markdown
+    assert first_source.calls == [VIDEO_URL]
+    assert fourth_path != first_path

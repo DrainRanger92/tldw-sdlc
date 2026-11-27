@@ -27,7 +27,7 @@ def test_layers_are_importable_packages(layer: str) -> None:
 class _UnusedService:
     """Заглушка сервиса: router собирается без обработки ссылок."""
 
-    def process(self, url: str) -> None:
+    def process(self, url: str, *, template: object | None = None) -> None:
         raise AssertionError("сервис не должен вызываться в тесте сборки")
 
 
@@ -85,14 +85,19 @@ def test_build_application_forwards_allowlist_to_router(
     fake_env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, tuple[int, ...]] = {}
+    captured: dict[str, object] = {}
 
     def recording_create_router(
         service: object,
         *,
         allowed_user_ids: tuple[int, ...] = (),
+        template_service: object | None = None,
+        template_parser: object | None = None,
     ) -> Router:
         captured["allowed_user_ids"] = allowed_user_ids
+        captured["service"] = service
+        captured["template_service"] = template_service
+        captured["template_parser"] = template_parser
         return Router(name="tldw")
 
     monkeypatch.setattr("tldw.bootstrap.create_router", recording_create_router)

@@ -1,19 +1,24 @@
-"""Сервисный слой: сценарии обработки видео.
+"""Сервисный слой: сценарии обработки видео и домен шаблона заметки.
 
 Сервисы связывают адаптеры и хранилище, не зависят от Telegram и не ходят
 в сеть напрямую — внешние вызовы приходят через адаптеры. Модель заметки
-и рендер Obsidian-Markdown живут в :mod:`tldw.services.note`, а сценарий
-«видео → конспект → ``.md``» — в :mod:`tldw.services.summary`.
+и рендер Obsidian-Markdown живут в :mod:`tldw.services.note`, сценарий
+«видео → конспект → ``.md``» — в :mod:`tldw.services.summary`, а домен
+пользовательского шаблона (разделы, тон, лимиты и встроенный шаблон) —
+в :mod:`tldw.services.template`.
 """
 
 from tldw.services.note import (
+    BUILTIN_SECTION_KINDS,
     FALLBACK_SLUG,
     FALLBACK_TITLE,
     FRONTMATTER_KEYS,
     NOTE_STATUS,
     SECTION_HEADINGS,
     Note,
+    NoteSection,
     Quote,
+    SectionKind,
     TimelineEntry,
     format_timecode,
     note_filename,
@@ -24,6 +29,7 @@ from tldw.services.note import (
 from tldw.services.summary import (
     DEFAULT_MAX_TRANSCRIPT_CHARS,
     MESSAGE_VIDEO_TOO_LONG,
+    TEMPLATE_ORIGIN_LABELS,
     TRANSCRIPT_TRUNCATION_MARKER,
     SummaryProvider,
     SummaryResult,
@@ -34,21 +40,66 @@ from tldw.services.summary import (
     build_note,
     join_transcript,
 )
+from tldw.services.template import (
+    BUILTIN_ACTIVE_TEMPLATE,
+    BUILTIN_SECTIONS,
+    BUILTIN_TEMPLATE,
+    MAX_DESCRIPTION_LENGTH,
+    MAX_HEADING_LENGTH,
+    MAX_SECTION_ITEMS,
+    MAX_SECTIONS,
+    MAX_TONE_LENGTH,
+    MIN_DESCRIPTION_LENGTH,
+    MIN_SECTION_ITEMS,
+    MIN_SECTIONS,
+    ActiveTemplate,
+    NoteTemplate,
+    TemplateOrigin,
+    TemplateParseError,
+    TemplatePatch,
+    TemplateRepository,
+    TemplateService,
+    TemplateValidationError,
+    merge_template,
+)
 
 __all__ = [
+    "BUILTIN_ACTIVE_TEMPLATE",
+    "BUILTIN_SECTION_KINDS",
+    "BUILTIN_SECTIONS",
+    "BUILTIN_TEMPLATE",
     "DEFAULT_MAX_TRANSCRIPT_CHARS",
     "FALLBACK_SLUG",
     "FALLBACK_TITLE",
     "FRONTMATTER_KEYS",
+    "MAX_DESCRIPTION_LENGTH",
+    "MAX_HEADING_LENGTH",
+    "MAX_SECTION_ITEMS",
+    "MAX_SECTIONS",
+    "MAX_TONE_LENGTH",
     "MESSAGE_VIDEO_TOO_LONG",
+    "MIN_DESCRIPTION_LENGTH",
+    "MIN_SECTION_ITEMS",
+    "MIN_SECTIONS",
     "NOTE_STATUS",
     "SECTION_HEADINGS",
+    "TEMPLATE_ORIGIN_LABELS",
     "TRANSCRIPT_TRUNCATION_MARKER",
+    "ActiveTemplate",
     "Note",
+    "NoteSection",
+    "NoteTemplate",
     "Quote",
+    "SectionKind",
     "SummaryProvider",
     "SummaryResult",
     "SummaryService",
+    "TemplateOrigin",
+    "TemplateParseError",
+    "TemplatePatch",
+    "TemplateRepository",
+    "TemplateService",
+    "TemplateValidationError",
     "TimelineEntry",
     "TranscriptText",
     "VideoSource",
@@ -56,6 +107,7 @@ __all__ = [
     "build_note",
     "format_timecode",
     "join_transcript",
+    "merge_template",
     "note_filename",
     "render_frontmatter",
     "render_note",

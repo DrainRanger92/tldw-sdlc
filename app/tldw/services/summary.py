@@ -17,6 +17,23 @@
 5. рендерит ``.md`` по шаблону T-002 и при заданном ``data_dir`` атомарно
    сохраняет его через :func:`tldw.storage.notes.save_note`.
 
+Активный шаблон пользователя (T-005, ``specs/002-user-note-templates``).
+:meth:`SummaryService.process` принимает необязательный снимок
+:class:`~tldw.services.template.ActiveTemplate`:
+
+* ``template=None`` — прежний встроенный путь: тот же промпт, та же заметка,
+  тот же файл, а суммаризатор вызывается без ``sections``/``tone``, поэтому
+  фейки с прежней сигнатурой продолжают работать;
+* шаблон задан — его разделы и тон уходят в суммаризатор одним вызовом LLM,
+  а заметка собирается из провалидированного ответа по T-004 в порядке
+  шаблона (:func:`build_note` с динамическими разделами).
+
+Снимок снимается **один раз в начале обработки**: разделы, тон и
+происхождение копируются в неизменяемое значение до первого тяжёлого вызова,
+поэтому смена сохранённого шаблона во время генерации не меняет результат.
+В лог попадают только происхождение шаблона и число разделов — без текста
+заголовков и тона.
+
 Граница порога: видео с ``duration_seconds == max_duration_seconds``
 допускается, отказ начинается только со следующей секунды. Неизвестная
 длительность (``None``) не блокирует обработку — адаптер YouTube считает
@@ -43,21 +60,29 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, NoReturn, Protocol
 
 from tldw.config import DEFAULT_MAX_VIDEO_DURATION_SECONDS, Settings
 from tldw.errors import UserFacingError
 from tldw.services.note import (
     Note,
+    NoteSection,
     Quote,
     TimelineEntry,
     format_timecode,
     note_filename,
     render_note,
 )
+from tldw.services.template import (
+    BUILTIN_SECTIONS,
+    ActiveTemplate,
+    TemplateOrigin,
+)
 from tldw.storage.notes import save_note
+from tldw.text import one_line
 
 if TYPE_CHECKING:
     from tldw.adapters.llm import VideoSummary
@@ -73,6 +98,11 @@ TRANSCRIPT_TRUNCATION_MARKER: Final = "[транскрипт усечён: {used
 MESSAGE_VIDEO_TOO_LONG: Final = (
     "Видео слишком длинное: {duration} при допустимом максимуме {limit}."
 )
+#: Подписи происхождения шаблона для лога (FR-12): без текста шаблона и тона.
+TEMPLATE_ORIGIN_LABELS: Final[Mapping[TemplateOrigin, str]] = {
+    TemplateOrigin.BUILTIN: "встроенный",
+    TemplateOrigin.USER: "пользовательский",
+}
 
 
 class VideoTooLongError(UserFacingError):
@@ -103,7 +133,14 @@ class VideoSource(Protocol):
 
 
 class SummaryProvider(Protocol):
-    """Суммаризатор; в приложении — ``LLMClient``."""
+    """Суммаризатор; в приложении — ``LLMClient``.
+
+    ``sections`` и ``tone`` — необязательные параметры пользовательского
+    шаблона (T-004). Сервис передаёт их только когда ему дан
+    ``ActiveTemplate``; на встроенном пути вызов остаётся прежним
+    (``summarize(transcript, *, title, channel)``), поэтому фейки со старой
+    сигнатурой продолжают работать.
+    """
 
     def summarize(
         self,
@@ -111,6 +148,8 @@ class SummaryProvider(Protocol):
         *,
         title: str = "",
         channel: str = "",
+        sections: Sequence[str] | None = None,
+        tone: str = "",
     ) -> VideoSummary:
         """Вернуть провалидированный конспект или поднять ``LLMError``."""
 
@@ -139,6 +178,35 @@ class SummaryResult:
     filename: str
     transcript: TranscriptText
     path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TemplateSnapshot:
+    """Разделы, тон и происхождение шаблона, снятые один раз на обработку.
+
+    Значение неизменяемое и самодостаточное: промпт, заметка и запись в лог
+    используют один и тот же снимок, поэтому смена сохранённого шаблона во
+    время генерации не меняет результат (FR-7). Для ``template=None`` снимок
+    описывает встроенный шаблон — он нужен только для лога, сам вызов LLM
+    остаётся прежним.
+    """
+
+    sections: tuple[str, ...]
+    tone: str
+    origin: TemplateOrigin
+
+
+def _template_snapshot(template: ActiveTemplate | None) -> _TemplateSnapshot:
+    """Снять разделы, тон и происхождение шаблона до первого тяжёлого вызова.
+
+    :raises TypeError: если передан не ``ActiveTemplate`` и не ``None``
+        (ошибка вызывающего кода, а не пользовательских данных).
+    """
+    if template is None:
+        return _TemplateSnapshot(BUILTIN_SECTIONS, "", TemplateOrigin.BUILTIN)
+    if not isinstance(template, ActiveTemplate):
+        raise TypeError("template должен быть ActiveTemplate или None")
+    return _TemplateSnapshot(template.sections, template.tone, template.origin)
 
 
 class SummaryService:
@@ -191,18 +259,37 @@ class SummaryService:
         """Порог длительности, действующий для этого сервиса."""
         return self._max_duration_seconds
 
-    def process(self, url: str) -> SummaryResult:
+    def process(
+        self,
+        url: str,
+        *,
+        template: ActiveTemplate | None = None,
+    ) -> SummaryResult:
         """Обработать ссылку и вернуть заметку с готовым ``.md``.
 
+        :param template: снимок активного шаблона пользователя; ``None``
+            (по умолчанию) — прежний встроенный путь. Снимок снимается один
+            раз здесь, до обращения к источнику видео, поэтому смена
+            сохранённого шаблона во время генерации не меняет ни промпт, ни
+            заметку, ни файл.
         :raises VideoTooLongError: видео длиннее порога из конфига; ни LLM,
             ни файл не вызываются.
         :raises tldw.adapters.youtube.YouTubeAdapterError: не YouTube, нет
             субтитров, видео недоступно или сетевая ошибка.
-        :raises tldw.adapters.llm.LLMError: LLM не ответил или ответ неполный;
-            частичной заметки не остаётся.
+        :raises tldw.adapters.llm.LLMError: LLM не ответил, ответ неполный или
+            не совпал с шаблоном; частичной заметки не остаётся.
+        :raises TypeError: если ``template`` — не ``ActiveTemplate`` и не
+            ``None``.
         """
         if not isinstance(url, str) or not url.strip():
             raise ValueError("url должен быть непустой строкой")
+
+        snapshot = _template_snapshot(template)
+        log.info(
+            "Конспект: шаблон %s, разделов: %s",
+            TEMPLATE_ORIGIN_LABELS[snapshot.origin],
+            len(snapshot.sections),
+        )
 
         video = self._video_source.fetch(url)
         self._ensure_duration(video)
@@ -215,12 +302,26 @@ class SummaryService:
                 self._max_transcript_chars,
             )
 
-        summary = self._summarizer.summarize(
-            material.text,
-            title=video.metadata.title,
-            channel=video.metadata.channel,
-        )
-        note = build_note(video, summary, source=url.strip())
+        note_sections: tuple[NoteSection, ...] = ()
+        if template is None:
+            # Прежний встроенный путь: без sections/tone, чтобы старые фейки
+            # суммаризатора и прежний промпт LLM оставались рабочими.
+            summary = self._summarizer.summarize(
+                material.text,
+                title=video.metadata.title,
+                channel=video.metadata.channel,
+            )
+        else:
+            summary = self._summarizer.summarize(
+                material.text,
+                title=video.metadata.title,
+                channel=video.metadata.channel,
+                sections=snapshot.sections,
+                tone=snapshot.tone,
+            )
+            note_sections = _note_sections(snapshot.sections, summary)
+
+        note = build_note(video, summary, source=url.strip(), sections=note_sections)
         markdown = render_note(note)
         filename = note_filename(note)
         path = save_note(self._data_dir, filename, markdown) if self._data_dir is not None else None
@@ -320,7 +421,13 @@ def join_transcript(
     )
 
 
-def build_note(video: Video, summary: VideoSummary, *, source: str | None = None) -> Note:
+def build_note(
+    video: Video,
+    summary: VideoSummary,
+    *,
+    source: str | None = None,
+    sections: Sequence[NoteSection] = (),
+) -> Note:
     """Собрать заметку из метаданных видео и провалидированного ответа LLM.
 
     ``source`` по умолчанию — ссылка из видео; сервис передаёт сюда исходную
@@ -328,6 +435,12 @@ def build_note(video: Video, summary: VideoSummary, *, source: str | None = None
     ``title``/``channel``/``duration`` — из метаданных видео. Строка вместо
     кортежа в ответе трактуется как один элемент, а не разбирается по символам:
     это защищает заметку от тихой порчи на границе LLM → модель.
+
+    ``sections`` — динамические разделы в порядке применения (T-003): если
+    переданы, заметка рендерится по ним, а поля ``tldr``…``follow_ups``
+    остаются заполненными для совместимости, но в ``.md`` не попадают.
+    Пустой ``sections`` (по умолчанию) даёт прежнюю заметку встроенного
+    шаблона; frontmatter из семи полей собирается одинаково в обоих случаях.
     """
     metadata = video.metadata
     return Note(
@@ -345,7 +458,70 @@ def build_note(video: Video, summary: VideoSummary, *, source: str | None = None
             Quote(text=quote.text, timecode=quote.timecode) for quote in summary.quotes
         ),
         follow_ups=_string_items(summary.follow_ups, "follow_ups"),
+        sections=tuple(sections),
     )
+
+
+def _note_sections(
+    headings: Sequence[str],
+    summary: VideoSummary,
+) -> tuple[NoteSection, ...]:
+    """Собрать динамические разделы заметки из ответа LLM в порядке шаблона.
+
+    Ответ LLM уже провалидирован адаптером по T-004, но сервис — то место, где
+    ответ сопоставляется с шаблоном, поэтому здесь повторяется только
+    структурная проверка пары «шаблон ↔ ответ»: разделов столько же, заголовки
+    те же и в том же порядке, каждый раздел непустой. Лимиты количества
+    пунктов остаются в адаптере (единый источник, T-004) и здесь не
+    дублируются.
+
+    Порядок и написание заголовков берутся из шаблона: даже если LLM вернул
+    заголовок в другом регистре, в заметку попадёт название пользователя.
+
+    :raises tldw.adapters.llm.LLMError: если раздела не хватает, он лишний,
+        перепутан порядок или раздел пуст — частичная заметка не создаётся.
+    """
+    raw_sections = summary.sections
+    if isinstance(raw_sections, (str, bytes)) or not isinstance(raw_sections, Sequence):
+        _fail_section_mismatch("ответ LLM не содержит разделов")
+    if len(raw_sections) != len(headings):
+        _fail_section_mismatch(f"разделов {len(raw_sections)} вместо {len(headings)}")
+    result: list[NoteSection] = []
+    for index, (heading, section) in enumerate(zip(headings, raw_sections, strict=True), start=1):
+        actual = getattr(section, "heading", None)
+        if not isinstance(actual, str) or one_line(actual).casefold() != heading.casefold():
+            _fail_section_mismatch(f"раздел {index}: заголовок не совпал с шаблоном")
+        result.append(NoteSection(heading=heading, items=_section_items(section, index)))
+    return tuple(result)
+
+
+def _section_items(section: object, index: int) -> tuple[str, ...]:
+    """Проверить пункты раздела ответа: непустые строки в исходном порядке."""
+    raw = getattr(section, "items", None)
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        _fail_section_mismatch(f"раздел {index}: пункты не список")
+    items = tuple(one_line(item) for item in raw if isinstance(item, str))
+    if len(items) != len(raw):
+        _fail_section_mismatch(f"раздел {index}: пункт не является текстом")
+    if not items:
+        _fail_section_mismatch(f"раздел {index}: пустой раздел")
+    if not all(items):
+        _fail_section_mismatch(f"раздел {index}: пустой пункт")
+    return items
+
+
+def _fail_section_mismatch(reason: str) -> NoReturn:
+    """Записать причину и поднять ``LLMError`` контракта LLM-адаптера.
+
+    Импорт локальный: сервис общается с LLM через протокол
+    :class:`SummaryProvider`, поэтому ``httpx`` не должен попадать в граф
+    импорта сервиса (ADR-002). Ветка выполняется только на ошибочном ответе,
+    который и так приходит из адаптера. Текст шаблона и тона в лог не попадает.
+    """
+    from tldw.adapters.llm import MESSAGE_LLM_BAD_RESPONSE, LLMError
+
+    log.warning("Конспект: ответ LLM не совпал с шаблоном — %s", reason)
+    raise LLMError(MESSAGE_LLM_BAD_RESPONSE)
 
 
 def _transcript_limit(value: object) -> int:
@@ -384,6 +560,7 @@ __all__ = [
     "SummaryProvider",
     "SummaryResult",
     "SummaryService",
+    "TEMPLATE_ORIGIN_LABELS",
     "TRANSCRIPT_TRUNCATION_MARKER",
     "TranscriptText",
     "VideoSource",

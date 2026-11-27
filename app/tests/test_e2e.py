@@ -17,13 +17,11 @@
 
 from __future__ import annotations
 
-import re
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 from aiogram.methods import SendDocument, SendMessage
 from aiogram.types import FSInputFile
 from support import (
@@ -33,8 +31,10 @@ from support import (
     VIDEO_URL,
     FakeSummarizer,
     FakeVideoSource,
+    frontmatter_keys,
     make_summary,
     make_video,
+    parse_frontmatter,
     request_types,
     run_message,
 )
@@ -52,13 +52,6 @@ from tldw.services.note import FRONTMATTER_KEYS, NOTE_STATUS, SECTION_HEADINGS
 from tldw.services.summary import MESSAGE_VIDEO_TOO_LONG, SummaryService
 
 MESSAGE_WITH_LINK = f"Посмотри это видео: {VIDEO_URL} — кажется, полезное."
-
-
-def parse_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
-    """Разобрать YAML frontmatter и вернуть его вместе с телом заметки."""
-    match = re.match(r"^---\n(.*?)\n---\n(.*)$", markdown, flags=re.DOTALL)
-    assert match is not None, "заметка должна начинаться с YAML frontmatter"
-    return yaml.safe_load(match.group(1)), match.group(2)
 
 
 def test_link_from_message_becomes_md_by_full_template(
@@ -126,11 +119,7 @@ def test_link_from_message_becomes_md_by_full_template(
         "tags": [],
         "status": NOTE_STATUS,
     }
-    raw_frontmatter = markdown.split("---\n", 2)[1]
-    written_keys = [
-        line.split(":", 1)[0] for line in raw_frontmatter.splitlines() if not line.startswith(" ")
-    ]
-    assert written_keys == list(FRONTMATTER_KEYS)
+    assert frontmatter_keys(markdown) == list(FRONTMATTER_KEYS)
 
     # --- Полный шаблон: 5 секций в фиксированном порядке. ---
     positions = [body.index(heading) for heading in SECTION_HEADINGS]

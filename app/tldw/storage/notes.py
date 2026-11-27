@@ -12,11 +12,9 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
-from tldw.storage.paths import ensure_data_dir
+from tldw.storage.atomic import atomic_write_text
 
 
 def note_path(data_dir: Path, filename: str) -> Path:
@@ -45,20 +43,7 @@ def save_note(data_dir: Path, filename: str, markdown: str) -> Path:
     if not isinstance(markdown, str) or not markdown.strip():
         raise ValueError("Текст заметки не может быть пустым")
     path = note_path(data_dir, filename)
-    ensure_data_dir(path.parent)
-
-    descriptor, temp_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.stem}-",
-        suffix=".tmp",
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(markdown)
-        os.replace(temp_name, path)
-    except BaseException:
-        Path(temp_name).unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, markdown)
     return path
 
 
